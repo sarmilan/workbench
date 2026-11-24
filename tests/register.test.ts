@@ -883,7 +883,8 @@ for (const [name, opts, ms] of [
 
 // ── The Stop test gate ────────────────────────────────────────────────────────
 // The command itself is stubbed. bin/stopgate.mjs decides; this checks Claude's hook wires it.
-const stopHarness = (on: Parameters<Parameters<typeof test>[1]>[1], opts: { file?: string | null; exitCode?: number; stderr?: string } = {}) => {
+// `git` answers `git -C /repo <args>` by its args joined with spaces; anything else fails, as outside a repo.
+const stopHarness = (on: Parameters<Parameters<typeof test>[1]>[1], opts: { file?: string | null; exitCode?: number; stderr?: string; git?: Record<string, string> } = {}) => {
   const file = 'file' in opts ? opts.file : '{"testCommand":"npm test"}'
   const exitCode = opts.exitCode ?? 1
   const stderr = opts.stderr ?? 'not ok 1'
@@ -902,7 +903,10 @@ const stopHarness = (on: Parameters<Parameters<typeof test>[1]>[1], opts: { file
   on('process.run', (_, e) => {
     const cmd = (e.argv ?? []).join(' ')
     calls.push(cmd)
-    if (e.argv?.[0] === 'git') return { value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    if (e.argv?.[0] === 'git') {
+      const answer = opts.git?.[(e.argv ?? []).slice(3).join(' ')]
+      return { value: { exitCode: answer == null ? 1 : 0, stdout: answer ?? '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     if (cmd.includes('npm test')) return { value: { exitCode, stdout: '', stderr, isStdoutTruncated: false, isStderrTruncated: false } }
     return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -955,6 +959,38 @@ test('an explicit off switch lets Claude stop', async ($, on) => {
   const result = await $.classic.Stop(stopEvent() as never)
   expect(result).toMatchObject({ continued: true })
   expect(calls.some(c => c.includes('npm test'))).toBe(false)
+})
+
+// A checkout on `branch` whose default branch is local main, forked at `base`.
+const stopGit = (branch: string, { ahead = '0', status = '' } = {}) => ({
+  'rev-parse --show-toplevel': '/repo\n',
+  'rev-parse --path-format=absolute --git-common-dir': '/repo/.git\n',
+  'rev-parse --abbrev-ref HEAD': `${branch}\n`,
+  'rev-parse --verify --quiet main': 'abc1234\n',
+  'merge-base HEAD main': 'abc1234\n',
+  'rev-list --count abc1234..HEAD': `${ahead}\n`,
+  'status --porcelain': status,
+})
+
+test('on the default branch Claude stops without running tests', async ($, on) => {
+  const { calls } = stopHarness(on, { git: stopGit('main') })
+  const result = await $.classic.Stop(stopEvent() as never)
+  expect(result).toMatchObject({ continued: true })
+  expect(calls.some(c => c.includes('npm test'))).toBe(false)
+})
+
+test('a branch with no changes lets Claude stop', async ($, on) => {
+  const { calls } = stopHarness(on, { git: stopGit('fix/x') })
+  const clean = await $.classic.Stop(stopEvent() as never)
+  expect(clean).toMatchObject({ continued: true })
+  expect(calls.some(c => c.includes('npm test'))).toBe(false)
+})
+
+test('a branch with a commit past the merge-base is tested', async ($, on) => {
+  const { calls } = stopHarness(on, { git: stopGit('fix/x', { ahead: '1' }) })
+  const result = await $.classic.Stop(stopEvent() as never)
+  expect(result.preventContinuation).toBe(true)
+  expect(calls.some(c => c.includes('npm test'))).toBe(true)
 })
 
 test('an interrupt lets Claude stop without running tests', async ($, on) => {

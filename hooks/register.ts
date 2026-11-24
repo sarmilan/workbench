@@ -9,7 +9,7 @@ import { keep } from '../bin/sessionstory.mjs'
 import { nextCache } from '../bin/cache.mjs'
 import { codeRun, gateReason as reviewWait, keptRuns, mergesPr, reportFromText, reviewsFile } from '../bin/cadence.mjs'
 import { resolveWritePath, shellWrites } from '../bin/shellwrite.mjs'
-import { lockPath, performGate, projectCommand, runInProgress, RUN_TIMEOUT_MS, sessionIdOf, shellLine, reuseDecision } from '../bin/stopgate.mjs'
+import { branchChanges, lockPath, performGate, projectCommand, runInProgress, RUN_TIMEOUT_MS, sessionIdOf, shellLine, reuseDecision } from '../bin/stopgate.mjs'
 
 // The controller (bin/pane.mjs) does the iTerm work; this module only decides when to call it.
 // It runs through sh so the user's PATH finds `node`; the script path is passed as an argument,
@@ -456,8 +456,9 @@ const message = (state: string, panel: Panel) => {
 
 // ── The Stop test gate (bin/stopgate.mjs) ─────────────────────────────────────
 // The command comes from the checkout's tests.json, then session-rail.json, then a command
-// named in AGENTS.md, then a real package.json test script, then this repo's own checks.
-// Nothing configured means the stop is allowed. The lock lets this hook and the command hook
+// named in AGENTS.md, then a real package.json test script (scoped to the touched packages in a
+// turbo or pnpm workspace), then this repo's own checks. Nothing configured, the default branch,
+// or a branch with nothing changed means the stop is allowed. The lock lets this hook and the command hook
 // share one run.
 const readText = async ($: EngineInterface, path: string) => {
   try { return String(await $.fs.read(path)) } catch { return null }
@@ -468,6 +469,11 @@ const readJsonFile = async ($: EngineInterface, path: string) => {
   try { return JSON.parse(text) as Record<string, unknown> } catch { return null }
 }
 const dirOf = (p: string) => p.slice(0, Math.max(0, p.lastIndexOf('/')))
+// What the branch changed against the default branch (stopgate's branchChanges), through $.process.
+const stopGit = ($: EngineInterface, cwd: string) => async (args: string[], timeoutMs = 5_000) => {
+  const r = await $.process.run(['git', '-C', cwd, ...args], { timeoutMs }).catch(() => null)
+  return r && r.exitCode === 0 ? r.stdout.trim() : null
+}
 const loadStopProject = async ($: EngineInterface) => {
   const cwd = await $.session.cwd()
   const top = await $.process.run(['git', '-C', cwd, 'rev-parse', '--show-toplevel'], { timeoutMs: 5_000 }).catch(() => null)
@@ -489,13 +495,20 @@ const loadStopProject = async ($: EngineInterface) => {
   }
   const scripts = pkg?.scripts
   const packageScript = scripts && typeof scripts === 'object' ? (scripts as { test?: unknown }).test : undefined
+  const exists = (p: string) => $.fs.exists(p).then(Boolean, () => false)
+  const [changes, turbo, pnpm] = await Promise.all([
+    topLine ? branchChanges(stopGit($, cwd)) : Promise.resolve(null),
+    exists(`${root}/turbo.json`),
+    exists(`${root}/pnpm-workspace.yaml`),
+  ])
   const resolved = projectCommand({
     project, local, agentsText,
     packageScript: typeof packageScript === 'string' ? packageScript : undefined,
     pluginName: typeof plugin?.name === 'string' ? plugin.name : undefined,
     hasRail,
+    workspace: { turbo, pnpm, base: changes?.base },
   })
-  return { root, command: resolved.command }
+  return { root, command: resolved.command, changes }
 }
 const stopOn = async ($: EngineInterface, event: Record<string, unknown>) => {
   if (await $.env.get('SESSION_RAIL_HEADLESS').catch(() => '')) return { action: 'allow' as const, quiet: true }

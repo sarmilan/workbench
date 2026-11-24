@@ -10,11 +10,17 @@ import { noteTests, fresh } from '../bin/activity.mjs';
 import { droopFor } from '../bin/mascot.mjs';
 import { loadProject, runStop } from '../bin/stop-hook.mjs';
 import {
-  commandFromAgents, gateDecision, hostReply, packageTestCommand, performGate, projectCommand,
-  resolveTestCommand, settingFrom, stopHookActive, wasInterrupted,
+  commandFromAgents, gateDecision, hostReply, isDefaultBranch, packageTestCommand, performGate, projectCommand,
+  resolveTestCommand, settingFrom, skipReason, stopHookActive, wasInterrupted, workspaceTestCommand,
 } from '../bin/stopgate.mjs';
 
 const HOOK = new URL('../bin/stop-hook.mjs', import.meta.url).pathname;
+
+// What the loader resolves, without the branch state (a temp folder outside git has none).
+async function load(dir) {
+  const { changes, ...rest } = await loadProject(dir);
+  return rest;
+}
 
 test('the command resolves setting, then AGENTS.md, then package script, then this repo, and off wins', () => {
   assert.equal(commandFromAgents('## Tests\n\nnpm test\n'), 'npm test');
@@ -129,7 +135,7 @@ function fixture(files) {
   return dir;
 }
 
-test('the project files are read in order, and AGENTS.md supplies the command', () => {
+test('the project files are read in order, and AGENTS.md supplies the command', async () => {
   const dir = fixture({
     'session-rail.json': '{"testCommand":"make check"}\n',
     'package.json': '{"scripts":{"test":"node --test"}}\n',
@@ -138,12 +144,12 @@ test('the project files are read in order, and AGENTS.md supplies the command', 
     'bin/rail.mjs': '',
   });
   try {
-    assert.deepEqual(loadProject(dir), { root: dir, command: 'make check', source: 'setting' });
+    assert.deepEqual((await load(dir)), { root: dir, command: 'make check', source: 'setting' });
     execFileSync('git', ['init'], { cwd: dir, stdio: 'ignore' });
     mkdirSync(join(dir, '.git', 'session-rail'), { recursive: true });
     writeFileSync(join(dir, '.git', 'session-rail', 'tests.json'), '{"command":false}\n');
-    assert.equal(loadProject(dir).command, null);
-    assert.equal(loadProject(dir).source, 'off');
+    assert.equal((await load(dir)).command, null);
+    assert.equal((await load(dir)).source, 'off');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -152,7 +158,7 @@ test('the project files are read in order, and AGENTS.md supplies the command', 
     'package.json': '{"scripts":{"test":"node --test"}}\n',
   });
   try {
-    assert.deepEqual(loadProject(agents), { root: agents, command: 'npm test', source: 'agents' });
+    assert.deepEqual((await load(agents)), { root: agents, command: 'npm test', source: 'agents' });
   } finally {
     rmSync(agents, { recursive: true, force: true });
   }
@@ -161,13 +167,13 @@ test('the project files are read in order, and AGENTS.md supplies the command', 
     'package.json': '{"scripts":{"test":"node --test"}}\n',
   });
   try {
-    assert.deepEqual(loadProject(prose), { root: prose, command: 'npm test', source: 'package' });
+    assert.deepEqual((await load(prose)), { root: prose, command: 'npm test', source: 'package' });
   } finally {
     rmSync(prose, { recursive: true, force: true });
   }
   const pkg = fixture({ 'package.json': '{"scripts":{"test":"echo \\"Error: no test specified\\" && exit 1"}}\n' });
   try {
-    assert.equal(loadProject(pkg).command, null);
+    assert.equal((await load(pkg)).command, null);
   } finally {
     rmSync(pkg, { recursive: true, force: true });
   }
@@ -247,7 +253,7 @@ test('the stop hook runs the command named in AGENTS.md', async () => {
     'code.txt': '1\n',
   });
   try {
-    assert.deepEqual(loadProject(dir), { root: dir, command: 'node check.mjs', source: 'agents' });
+    assert.deepEqual((await load(dir)), { root: dir, command: 'node check.mjs', source: 'agents' });
     const red = await runHook(dir, { last_assistant_message: 'red agents' }, 'claude');
     assert.equal(red.code, 2);
     assert.match(red.stderr, /tests failed \(node check\.mjs\)/);
@@ -272,14 +278,14 @@ const REPO_TEST_COMMAND = [
   'node bin/desk.mjs --frame 80 40 --tab diff',
 ].join(' && ');
 
-test('this repo takes its test command from AGENTS.md', () => {
+test('this repo takes its test command from AGENTS.md', async () => {
   const root = fileURLToPath(new URL('..', import.meta.url));
   const text = readFileSync(join(root, 'AGENTS.md'), 'utf8');
   assert.ok(text.split('\n').length < 80, 'AGENTS.md stays short');
   assert.match(text, /CLAUDE\.md/);
   assert.equal(text.includes('Say the plan is in the Plan tab'), false);
   assert.equal(commandFromAgents(text), REPO_TEST_COMMAND);
-  const loaded = loadProject(root);
+  const loaded = (await load(root));
   assert.equal(loaded.source, 'agents');
   assert.equal(loaded.command, REPO_TEST_COMMAND);
 });
@@ -297,6 +303,133 @@ test('runStop agrees with the process for a pass and a headless skip', async () 
   } finally {
     if (previous == null) delete process.env.SESSION_RAIL_HEADLESS;
     else process.env.SESSION_RAIL_HEADLESS = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── Nothing to check: the default branch, or a branch with no changes ─────────
+
+test('the default branch and a branch with no changes are skipped; a folder outside git is not', () => {
+  assert.equal(isDefaultBranch('main', 'origin/main'), true);
+  assert.equal(isDefaultBranch('main', 'main'), true);
+  assert.equal(isDefaultBranch('develop', 'origin/develop'), true);
+  assert.equal(isDefaultBranch('feature/x', 'origin/main'), false);
+  assert.equal(isDefaultBranch('main', null), false);
+  assert.equal(skipReason(null), null);
+  assert.equal(skipReason({ branch: 'main', onDefault: true }), 'default-branch');
+  assert.equal(skipReason({ branch: 'fix/x', onDefault: false, base: 'abc1234', ahead: 0, dirty: false }), 'no-changes');
+  assert.equal(skipReason({ branch: 'fix/x', onDefault: false, base: 'abc1234', ahead: 0, dirty: true }), null);
+  assert.equal(skipReason({ branch: 'fix/x', onDefault: false, base: 'abc1234', ahead: 2, dirty: false }), null);
+  // git couldn't say: run, as before.
+  assert.equal(skipReason({ branch: 'fix/x', onDefault: false, base: null, ahead: null, dirty: null }), null);
+  assert.equal(skipReason({ branch: 'fix/x', onDefault: false, base: 'abc1234', ahead: 0, dirty: null }), null);
+});
+
+test('with nothing changed, the gate does not run the command', async () => {
+  let runs = 0;
+  const io = (changes) => ({
+    now: () => 1,
+    load: async () => ({ command: 'npm test', root: '/repo', changes }),
+    readLock: async () => null,
+    writeLock: async () => {},
+    run: async () => { runs += 1; return { exitCode: 1, output: 'not ok' }; },
+  });
+  const event = { hook_event_name: 'Stop', session_id: 's', last_assistant_message: 'done' };
+  const main = await performGate(event, io({ branch: 'main', onDefault: true }));
+  assert.equal(main.action, 'allow');
+  assert.equal(main.quiet, true);
+  assert.equal(main.why, 'default-branch');
+  const clean = await performGate(event, io({ branch: 'fix/x', onDefault: false, base: 'abc1234', ahead: 0, dirty: false }));
+  assert.equal(clean.why, 'no-changes');
+  assert.equal(runs, 0);
+  const changed = await performGate(event, io({ branch: 'fix/x', onDefault: false, base: 'abc1234', ahead: 1, dirty: false }));
+  assert.equal(changed.action, 'block');
+  assert.equal(runs, 1);
+});
+
+test('a workspace repo tests only the packages the branch touched', () => {
+  const base = 'a1b2c3d4e5f6';
+  assert.equal(workspaceTestCommand({ turbo: true, pnpm: true, base }), `npx turbo run test --filter=...[${base}]`);
+  assert.equal(workspaceTestCommand({ pnpm: true, base }), `pnpm -r --filter "...[${base}]" test`);
+  assert.equal(workspaceTestCommand({ base }), null);
+  assert.equal(workspaceTestCommand({ turbo: true, base: null }), null);
+  assert.equal(workspaceTestCommand({ turbo: true, base: 'main; rm -rf /' }), null);
+  assert.deepEqual(resolveTestCommand({ packageScript: 'turbo run test', workspace: { turbo: true, base } }),
+    { command: `npx turbo run test --filter=...[${base}]`, source: 'workspace' });
+  // A command someone named runs as written; a workspace with no merge-base keeps the package script.
+  assert.equal(resolveTestCommand({ agentsText: 'Tests: pnpm test\n', packageScript: 'turbo run test', workspace: { turbo: true, base } }).command, 'pnpm test');
+  assert.deepEqual(resolveTestCommand({ packageScript: 'turbo run test', workspace: { turbo: true } }), { command: 'npm test', source: 'package' });
+  // No root test script: nothing to scope.
+  assert.deepEqual(resolveTestCommand({ workspace: { turbo: true, base } }), { command: null, source: null });
+});
+
+const gitIn = (dir, ...args) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+
+// A repo on main with one commit, then a feature branch. `files` are committed on main.
+function gitFixture(files) {
+  const dir = fixture(files);
+  gitIn(dir, 'init', '-q', '-b', 'main');
+  gitIn(dir, 'config', 'user.email', 'test@example.com');
+  gitIn(dir, 'config', 'user.name', 'Test');
+  gitIn(dir, 'config', 'commit.gpgsign', 'false');
+  writeFileSync(join(dir, '.gitignore'), 'ran\nhome/\n');
+  gitIn(dir, 'add', '-A');
+  gitIn(dir, 'commit', '-q', '-m', 'base');
+  return dir;
+}
+
+test('a git repo is skipped on main and on a clean branch, and tested once the branch changes something', async () => {
+  const dir = gitFixture({
+    'session-rail.json': '{"testCommand":"node marker.mjs"}\n',
+    'marker.mjs': "import { writeFileSync } from 'node:fs';\nwriteFileSync('ran', '1');\nprocess.exit(1);\n",
+  });
+  try {
+    const onMain = await runHook(dir, { last_assistant_message: 'main' }, 'claude');
+    assert.equal(onMain.code, 0);
+    assert.equal(onMain.stderr, '');
+    assert.equal(existsSync(join(dir, 'ran')), false, 'main is not tested');
+    assert.equal((await loadProject(dir)).changes.onDefault, true);
+
+    gitIn(dir, 'switch', '-q', '-c', 'fix/x');
+    const clean = await runHook(dir, { last_assistant_message: 'clean branch' }, 'grok');
+    assert.equal(clean.code, 0);
+    assert.equal(clean.stdout, '');
+    assert.equal(existsSync(join(dir, 'ran')), false, 'a branch with no changes is not tested');
+
+    writeFileSync(join(dir, 'change.txt'), 'x\n');
+    const dirty = await runHook(dir, { last_assistant_message: 'dirty branch' }, 'claude');
+    assert.equal(dirty.code, 2);
+    assert.match(dirty.stderr, /tests failed/);
+    assert.equal(existsSync(join(dir, 'ran')), true);
+
+    rmSync(join(dir, 'ran'));
+    gitIn(dir, 'add', '-A');
+    gitIn(dir, 'commit', '-q', '-m', 'change');
+    const committed = await runHook(dir, { last_assistant_message: 'committed branch' }, 'claude');
+    assert.equal(committed.code, 2);
+    assert.equal(existsSync(join(dir, 'ran')), true, 'a commit past the merge-base is tested');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a turbo or pnpm workspace filters the package test from the merge-base', async () => {
+  const dir = gitFixture({
+    'package.json': '{"scripts":{"test":"turbo run test"}}\n',
+    'turbo.json': '{}\n',
+    'pnpm-workspace.yaml': 'packages: ["apps/*"]\n',
+  });
+  try {
+    const base = gitIn(dir, 'rev-parse', 'HEAD');
+    gitIn(dir, 'switch', '-q', '-c', 'fix/x');
+    const turbo = await loadProject(dir);
+    assert.equal(turbo.source, 'workspace');
+    assert.equal(turbo.command, `npx turbo run test --filter=...[${base}]`);
+    assert.equal(turbo.changes.base, base);
+    rmSync(join(dir, 'turbo.json'));
+    const pnpm = await loadProject(dir);
+    assert.equal(pnpm.command, `pnpm -r --filter "...[${base}]" test`);
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });

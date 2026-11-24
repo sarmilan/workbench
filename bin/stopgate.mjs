@@ -1,7 +1,8 @@
 // The Stop test gate. Pure, no Node APIs: the Claude hook (hooks/register.ts) and the command
 // hook (bin/stop-hook.mjs) both follow it. A stop is held when the project's test command fails,
 // once. stop_hook_active, an interrupt, or no command at all lets it through, so a folder with
-// nothing configured is never blocked and a block cannot loop.
+// nothing configured is never blocked and a block cannot loop. The default branch, and a branch
+// with nothing changed against it, are not tested at all.
 //
 // commandFromAgents reads a test command from the project's AGENTS.md. A fence tagged test,
 // then a Tests: line, then the first command under a Tests heading. Prose is not a command,
@@ -285,6 +286,69 @@ export function packageTestCommand(script) {
   return 'npm test';
 }
 
+// A merge-base is a full or short sha; anything else never reaches a shell line.
+const SHA = /^[0-9a-f]{7,40}$/;
+
+/**
+ * In a workspace repo the package fallback tests the packages the branch touched (and what depends on
+ * them), never the whole tree. null outside a workspace, or without a merge-base to filter from.
+ * @param {{ turbo?: boolean, pnpm?: boolean, base?: string | null }} workspace
+ */
+export function workspaceTestCommand({ turbo, pnpm, base } = {}) {
+  if (!base || !SHA.test(base)) return null;
+  if (turbo) return `npx turbo run test --filter=...[${base}]`;
+  if (pnpm) return `pnpm -r --filter "...[${base}]" test`;
+  return null;
+}
+
+// `origin/main` and `main` name the same branch. `defaultRef` is what sources.mjs defaultBranch returns.
+export function isDefaultBranch(branch, defaultRef) {
+  const name = String(defaultRef || '').replace(/^origin\//, '');
+  return Boolean(branch && name && branch === name);
+}
+
+const DEFAULT_CANDIDATES = ['origin/main', 'origin/master', 'main', 'master'];
+
+/**
+ * What the branch changed against the default branch, for skipReason and the workspace filter.
+ * `git(args, timeoutMs)` runs git in the checkout and resolves its trimmed stdout, or null on failure;
+ * each host passes its own runner. The default branch follows sources.mjs defaultBranch: origin/HEAD,
+ * else main/master (remote, then local). null outside a git checkout.
+ * @param {(args: string[], timeoutMs?: number) => Promise<string | null>} git
+ */
+export async function branchChanges(git) {
+  const branch = await git(['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (!branch) return null;
+  let ref = null;
+  const head = await git(['rev-parse', '--abbrev-ref', 'origin/HEAD']);
+  for (const c of new Set([head, ...DEFAULT_CANDIDATES].filter(Boolean))) {
+    if ((await git(['rev-parse', '--verify', '--quiet', c])) != null) { ref = c; break; }
+  }
+  if (!ref) return { branch, onDefault: false, base: null, ahead: null, dirty: null };
+  if (isDefaultBranch(branch, ref)) return { branch, onDefault: true, base: null, ahead: null, dirty: null };
+  const base = await git(['merge-base', 'HEAD', ref]);
+  const count = base ? await git(['rev-list', '--count', `${base}..HEAD`]) : null;
+  const status = await git(['status', '--porcelain'], 15_000);
+  return {
+    branch, onDefault: false, base: base || null,
+    ahead: count != null && /^\d+$/.test(count) ? Number(count) : null,
+    dirty: status == null ? null : status !== '',
+  };
+}
+
+/**
+ * Why there is nothing to test, or null to run. `changes` is null outside a git checkout (or when git
+ * can't say), which runs as before. On the default branch, or a branch with no commits past its
+ * merge-base and a clean tree, the session has changed nothing the gate could hold it for.
+ * @param {{ branch?: string, onDefault?: boolean, base?: string | null, ahead?: number | null, dirty?: boolean | null } | null} changes
+ */
+export function skipReason(changes) {
+  if (!changes || !changes.branch) return null;
+  if (changes.onDefault) return 'default-branch';
+  if (changes.base && changes.ahead === 0 && changes.dirty === false) return 'no-changes';
+  return null;
+}
+
 export function workbenchDefault({ pluginName, hasRail } = {}) {
   if (pluginName === 'session-rail' && hasRail) return WORKBENCH_TEST_COMMAND;
   return null;
@@ -294,23 +358,26 @@ export function workbenchDefault({ pluginName, hasRail } = {}) {
  * First match wins. `setting` false turns the rest off, including this repo's default.
  * @returns {{ command: string | null, source: string | null }}
  */
-export function resolveTestCommand({ setting, agentsText, packageScript, repoDefault } = {}) {
+export function resolveTestCommand({ setting, agentsText, packageScript, repoDefault, workspace } = {}) {
   if (setting === false) return { command: null, source: 'off' };
   if (typeof setting === 'string' && setting.trim()) return { command: setting.trim(), source: 'setting' };
   const agents = commandFromAgents(agentsText);
   if (agents) return { command: agents, source: 'agents' };
   const pkg = packageTestCommand(packageScript);
+  const scoped = pkg && workspaceTestCommand(workspace);
+  if (scoped) return { command: scoped, source: 'workspace' };
   if (pkg) return { command: pkg, source: 'package' };
   if (typeof repoDefault === 'string' && repoDefault.trim()) return { command: repoDefault.trim(), source: 'default' };
   return { command: null, source: null };
 }
 
-export function projectCommand({ project, local, agentsText, packageScript, pluginName, hasRail } = {}) {
+export function projectCommand({ project, local, agentsText, packageScript, pluginName, hasRail, workspace } = {}) {
   return resolveTestCommand({
     setting: settingFrom(project, local),
     agentsText,
     packageScript,
     repoDefault: workbenchDefault({ pluginName, hasRail }),
+    workspace,
   });
 }
 
@@ -364,7 +431,7 @@ export function runInProgress(record, key, now, windowMs = RUN_WAIT_MS) {
 }
 
 /**
- * io.load() → { command, root }. io.run(command, root) → { exitCode, output, timedOut, spawnError }
+ * io.load() → { command, root, changes }, where changes is null or what skipReason reads. io.run(command, root) → { exitCode, output, timedOut, spawnError }
  * and never throws. io.readLock / writeLock / wait are optional; wait resolves to a decision or null.
  */
 export async function performGate(event, io) {
@@ -376,6 +443,8 @@ export async function performGate(event, io) {
   const command = loaded?.command || '';
   const root = loaded?.root || '';
   if (!command) return allowQuiet('no-command');
+  const skip = skipReason(loaded?.changes);
+  if (skip) return allowQuiet(skip);
   const key = stopKey(event);
   const now = io.now();
   let prior = null;
