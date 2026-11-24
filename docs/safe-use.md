@@ -26,7 +26,7 @@ Approve a brief for a checkout you mean the agent to edit. The brief gate is a p
 
 ## The brief gate and shell writes
 
-The gate covers Edit, Write, and NotebookEdit, and a shell command that creates, overwrites, moves, or deletes a file in the checkout. `bin/shellwrite.mjs` is that check, for Claude's `Bash` and Grok's `run_terminal_command`. `git log`, tests, and commits still run. `gh pr merge` stays on the review gate. The brief file can still be written, and its approval file cannot. A command whose path is not a literal is treated as a write, so you run it yourself. The denial uses the same brief reason, the rail shows Held, and the pet keeps its `?`.
+The gate covers Edit, Write, and NotebookEdit, and a shell command that creates, overwrites, moves, or deletes a file in the checkout. `bin/shellwrite.mjs` is that check, for Claude's `Bash` and Grok's `run_terminal_command`. `git log`, tests, and commits still run. `gh pr merge` stays on the review gate. The brief file can still be written, and its approval file cannot. A command whose path is not a literal is treated as a write, so you run it yourself. A path from `~`, `$HOME` or `${HOME}` resolves against HOME. On main or master, `git pull` and `git merge --ff-only` run, and git's lock files can be cleared on any branch. The denial uses the same brief reason, the rail shows Held, and the pet keeps its `?`.
 
 That check still runs inside the plugin. A command that writes outside the checkout is outside it.
 

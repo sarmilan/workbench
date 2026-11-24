@@ -1,7 +1,9 @@
 // The Stop test gate. Pure, no Node APIs: the Claude hook (hooks/register.ts) and the command
 // hook (bin/stop-hook.mjs) both follow it. A stop is held when the project's test command fails,
 // once. stop_hook_active, an interrupt, or no command at all lets it through, so a folder with
-// nothing configured is never blocked and a block cannot loop.
+// nothing configured is never blocked and a block cannot loop. The default branch, and a branch
+// with nothing changed against it, are not tested at all. The same failure holds at most MAX_HOLDS
+// stops in a row.
 //
 // commandFromAgents reads a test command from the project's AGENTS.md. A fence tagged test,
 // then a Tests: line, then the first command under a Tests heading. Prose is not a command,
@@ -285,6 +287,82 @@ export function packageTestCommand(script) {
   return 'npm test';
 }
 
+// A merge-base is a full or short sha; anything else never reaches a shell line.
+const SHA = /^[0-9a-f]{7,40}$/;
+
+/**
+ * In a workspace repo the package fallback tests the packages the branch touched (and what depends on
+ * them), never the whole tree. Only when the root script already fans out that way (`turbo run test`,
+ * `pnpm -r test`), so the filtered command runs the same tasks; any other root script runs as written.
+ * null outside a workspace, or without a merge-base to filter from.
+ * @param {{ turbo?: boolean, pnpm?: boolean, base?: string | null }} workspace
+ * @param {string} [script] the root package.json test script
+ */
+export function workspaceTestCommand({ turbo, pnpm, base } = {}, script = '') {
+  if (!base || !SHA.test(base)) return null;
+  const s = String(script || '');
+  if (turbo && /\bturbo\b/.test(s)) return `npx turbo run test --filter=...[${base}]`;
+  if (pnpm && /\bpnpm\b.*\s(?:-r|--recursive)\b/.test(s)) return `pnpm -r --filter "...[${base}]" test`;
+  return null;
+}
+
+// `origin/main` and `main` name the same branch. `defaultRef` is what sources.mjs defaultBranch returns.
+export function isDefaultBranch(branch, defaultRef) {
+  const name = String(defaultRef || '').replace(/^origin\//, '');
+  return Boolean(branch && name && branch === name);
+}
+
+const DEFAULT_CANDIDATES = ['origin/main', 'origin/master', 'main', 'master'];
+
+/**
+ * The default branch's ref: origin/HEAD, else the first of main/master that exists (remote, then local).
+ * The one rule, shared by sources.mjs (the rail and the desk) and branchChanges here.
+ * `git(args)` resolves trimmed stdout, or null on failure.
+ * @param {(args: string[]) => Promise<string | null>} git
+ */
+export async function defaultRef(git) {
+  const head = await git(['rev-parse', '--abbrev-ref', 'origin/HEAD']);
+  for (const c of new Set([head, ...DEFAULT_CANDIDATES].filter(Boolean))) {
+    if ((await git(['rev-parse', '--verify', '--quiet', c])) != null) return c;
+  }
+  return null;
+}
+
+/**
+ * What the branch changed against the default branch, for skipReason and the workspace filter.
+ * `git(args, timeoutMs)` runs git in the checkout and resolves its trimmed stdout, or null on failure;
+ * each host passes its own runner. The default branch is defaultRef's. null outside a git checkout.
+ * @param {(args: string[], timeoutMs?: number) => Promise<string | null>} git
+ */
+export async function branchChanges(git) {
+  const branch = await git(['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (!branch) return null;
+  const ref = await defaultRef(git);
+  if (!ref) return { branch, onDefault: false, base: null, ahead: null, dirty: null };
+  if (isDefaultBranch(branch, ref)) return { branch, onDefault: true, base: null, ahead: null, dirty: null };
+  const base = await git(['merge-base', 'HEAD', ref]);
+  const count = base ? await git(['rev-list', '--count', `${base}..HEAD`]) : null;
+  const status = await git(['status', '--porcelain'], 15_000);
+  return {
+    branch, onDefault: false, base: base || null,
+    ahead: count != null && /^\d+$/.test(count) ? Number(count) : null,
+    dirty: status == null ? null : status !== '',
+  };
+}
+
+/**
+ * Why there is nothing to test, or null to run. `changes` is null outside a git checkout (or when git
+ * can't say), which runs as before. On the default branch, or a branch with no commits past its
+ * merge-base and a clean tree, the session has changed nothing the gate could hold it for.
+ * @param {{ branch?: string, onDefault?: boolean, base?: string | null, ahead?: number | null, dirty?: boolean | null } | null} changes
+ */
+export function skipReason(changes) {
+  if (!changes || !changes.branch) return null;
+  if (changes.onDefault) return 'default-branch';
+  if (changes.base && changes.ahead === 0 && changes.dirty === false) return 'no-changes';
+  return null;
+}
+
 export function workbenchDefault({ pluginName, hasRail } = {}) {
   if (pluginName === 'session-rail' && hasRail) return WORKBENCH_TEST_COMMAND;
   return null;
@@ -294,23 +372,26 @@ export function workbenchDefault({ pluginName, hasRail } = {}) {
  * First match wins. `setting` false turns the rest off, including this repo's default.
  * @returns {{ command: string | null, source: string | null }}
  */
-export function resolveTestCommand({ setting, agentsText, packageScript, repoDefault } = {}) {
+export function resolveTestCommand({ setting, agentsText, packageScript, repoDefault, workspace } = {}) {
   if (setting === false) return { command: null, source: 'off' };
   if (typeof setting === 'string' && setting.trim()) return { command: setting.trim(), source: 'setting' };
   const agents = commandFromAgents(agentsText);
   if (agents) return { command: agents, source: 'agents' };
   const pkg = packageTestCommand(packageScript);
+  const scoped = pkg && workspaceTestCommand(workspace, packageScript);
+  if (scoped) return { command: scoped, source: 'workspace' };
   if (pkg) return { command: pkg, source: 'package' };
   if (typeof repoDefault === 'string' && repoDefault.trim()) return { command: repoDefault.trim(), source: 'default' };
   return { command: null, source: null };
 }
 
-export function projectCommand({ project, local, agentsText, packageScript, pluginName, hasRail } = {}) {
+export function projectCommand({ project, local, agentsText, packageScript, pluginName, hasRail, workspace } = {}) {
   return resolveTestCommand({
     setting: settingFrom(project, local),
     agentsText,
     packageScript,
     repoDefault: workbenchDefault({ pluginName, hasRail }),
+    workspace,
   });
 }
 
@@ -332,15 +413,54 @@ export function tailText(output, lines = 30, chars = 1000) {
   return tail.slice(-chars);
 }
 
+// How many stops in a row the same failure holds. The next identical one is let through with a note.
+export const MAX_HOLDS = 2;
+
+const shownCommand = (command) => (command.length > 180 ? `${command.slice(0, 177)}…` : command);
+
+/**
+ * What makes two failures the same result: the output tail without durations and timestamps, which
+ * change on every run (turbo's `Time: 4.529s`, a test's `(12ms)`) even when nothing else does.
+ * @param {string} text
+ */
+export function failureFingerprint(text) {
+  return String(text ?? '')
+    .replace(/\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?/g, '<time>')
+    .replace(/\b\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\b/g, '<time>')
+    .replace(/\b\d+(?:\.\d+)?\s?(?:ms|s|secs?|seconds?|mins?|minutes?)\b|\b\d+(?:\.\d+)?[mh]\b/gi, '<dur>')
+    .replace(/[ \t]+/g, ' ')
+    .trim();
+}
+
 function block(command, detail, why) {
-  const shown = command.length > 180 ? `${command.slice(0, 177)}…` : command;
-  const head = `session-rail: tests failed (${shown}). The stop is held. Fix the failures and finish again.`;
+  const head = `session-rail: tests failed (${shownCommand(command)}). The stop is held. Fix the failures and finish again.`;
   const reason = detail ? `${head}\n${detail}` : head;
   const line = detail.split('\n').map((l) => l.trim()).filter(Boolean)[0] || '';
   return {
     action: 'block', quiet: false, why, reason: reason.slice(0, 2500), ok: false,
     command, detail: clean(line).replace(/\s+/g, ' ').trim().slice(0, 200), at: 0,
+    fingerprint: `${why}\n${failureFingerprint(detail)}`,
   };
+}
+
+/**
+ * The same failure is held MAX_HOLDS stops in a row, then let through: holding again can't help, and a
+ * cached suite (turbo) replays it exactly. The first one let through carries a note, the rest none.
+ * A pass, or a different failure, starts over. `streak` is `{ fingerprint, count }` from the lock record.
+ * @returns {{ decision: object, streak: { fingerprint: string, count: number } }}
+ */
+export function repeatDecision(decision, streak) {
+  if (!decision || decision.action !== 'block' || !decision.fingerprint) {
+    return { decision, streak: { fingerprint: '', count: 0 } };
+  }
+  const same = streak && streak.fingerprint === decision.fingerprint;
+  const count = same ? (Number(streak.count) || 0) + 1 : 1;
+  const next = { fingerprint: decision.fingerprint, count };
+  if (count <= MAX_HOLDS) return { decision, streak: next };
+  const note = count === MAX_HOLDS + 1
+    ? `session-rail: tests failed (${shownCommand(decision.command)}) with the same result as the last ${MAX_HOLDS} held stops. Not holding again until the result changes.`
+    : '';
+  return { decision: { ...decision, action: 'allow', why: 'repeat', reason: '', note }, streak: next };
 }
 
 // `exitCode` 0 allows. A timeout, a spawn error, or any other status blocks.
@@ -364,7 +484,7 @@ export function runInProgress(record, key, now, windowMs = RUN_WAIT_MS) {
 }
 
 /**
- * io.load() → { command, root }. io.run(command, root) → { exitCode, output, timedOut, spawnError }
+ * io.load() → { command, root, changes }, where changes is null or what skipReason reads. io.run(command, root) → { exitCode, output, timedOut, spawnError }
  * and never throws. io.readLock / writeLock / wait are optional; wait resolves to a decision or null.
  */
 export async function performGate(event, io) {
@@ -376,6 +496,8 @@ export async function performGate(event, io) {
   const command = loaded?.command || '';
   const root = loaded?.root || '';
   if (!command) return allowQuiet('no-command');
+  const skip = skipReason(loaded?.changes);
+  if (skip) return allowQuiet(skip);
   const key = stopKey(event);
   const now = io.now();
   let prior = null;
@@ -386,17 +508,24 @@ export async function performGate(event, io) {
     const waited = await io.wait(key);
     if (waited) return waited;
   }
-  try { await io.writeLock({ key, at: now, done: false }); } catch { /* the run still happens */ }
+  // The streak outlives each stop's record, so it is carried into every write.
+  const streak = prior?.streak;
+  try { await io.writeLock({ key, at: now, done: false, streak }); } catch { /* the run still happens */ }
   const result = await io.run(command, root);
-  const decision = { ...gateDecision({ command, ...result }), at: io.now() };
-  try { await io.writeLock({ key, at: decision.at, done: true, decision }); } catch { /* the reply still stands */ }
+  const repeated = repeatDecision({ ...gateDecision({ command, ...result }), at: io.now() }, streak);
+  const decision = repeated.decision;
+  try { await io.writeLock({ key, at: decision.at, done: true, decision, streak: repeated.streak }); } catch { /* the reply still stands */ }
   return decision;
 }
 
 // Claude's command hook blocks with exit 2 and the reason on stderr. Grok's hook prints a block
 // decision and exits 0 (a non-zero exit is how a broken Grok hook fails open). Neither sets
 // `continue: false`, which would end the turn instead of sending the agent back.
+// A stop let through with a note (repeatDecision) shows it to the person on Claude as a systemMessage.
 export function hostReply(host, decision) {
+  if (decision?.action === 'allow' && decision.note && host !== 'grok') {
+    return { exitCode: 0, stdout: JSON.stringify({ systemMessage: decision.note }), stderr: '' };
+  }
   if (!decision || decision.action !== 'block') return { exitCode: 0, stdout: '', stderr: '' };
   const stdout = JSON.stringify({ decision: 'block', reason: decision.reason });
   if (host === 'grok') return { exitCode: 0, stdout, stderr: '' };

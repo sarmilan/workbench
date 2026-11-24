@@ -37,13 +37,18 @@ function isDevice(p) {
 
 /**
  * Absolute path of a literal write target, with `.` and `..` folded. `cwd` is the session's
- * working directory. A relative target joins onto it.
+ * working directory. A relative target joins onto it. `~` and `~/…` (shellWrites keeps `$HOME`
+ * that way too) resolve against `home`. Without a home they stay a path inside cwd, so the gate
+ * still treats them as the checkout.
  * @param {string} cwd
  * @param {string} target
+ * @param {string} [home]
  */
-export function resolveWritePath(cwd, target) {
-  const raw = String(target ?? '');
+export function resolveWritePath(cwd, target, home) {
+  let raw = String(target ?? '');
   if (!raw || raw.includes('\0')) return null;
+  const h = String(home ?? '').replace(/\/$/, '');
+  if (h.startsWith('/') && (raw === '~' || raw.startsWith('~/'))) raw = `${h}${raw.slice(1)}`;
   const base = String(cwd ?? '').replace(/\/$/, '');
   const joined = raw.startsWith('/') ? raw : `${base}/${raw}`;
   const parts = [];
@@ -55,16 +60,39 @@ export function resolveWritePath(cwd, target) {
   return `/${parts.join('/')}`;
 }
 
+// `git pull` and `git merge --ff-only` from the branch's upstream (gitSyncs) bring the checked-out branch up to date. Inside the scan they
+// are this marker (no path holds a NUL), and shellWrites decides at the top what it means.
+const GIT_SYNC = '\0git-sync';
+
 /**
  * Paths a command would create, overwrite, move or delete.
  * `null` when the command does not write a file.
  * An entry of `null` is a write whose path is not a literal (treat it as inside the checkout).
- * Device sinks are omitted.
+ * Device sinks are omitted. A path that starts with `~`, `$HOME` or `${HOME}` comes back as `~/…`
+ * for resolveWritePath to expand.
+ * `onDefault`: the checkout is on a branch that holds no brief (main, master), where syncing it with
+ * `git pull` or `git merge --ff-only` is maintenance, not a write. Elsewhere they are a write.
  * @param {string} command
- * @param {number} [depth]
+ * @param {{ onDefault?: boolean }} [opts]
  * @returns {(string | null)[] | null}
  */
-export function shellWrites(command, depth = 0) {
+export function shellWrites(command, { onDefault = false } = {}) {
+  const found = writesOf(command, 0);
+  if (!found) return null;
+  const kept = [];
+  for (const t of found) {
+    if (t !== GIT_SYNC) kept.push(t);
+    else if (!onDefault) kept.push(null);
+  }
+  return kept.length ? kept : null;
+}
+
+/**
+ * @param {string} command
+ * @param {number} depth
+ * @returns {(string | null)[] | null}
+ */
+function writesOf(command, depth) {
   if (depth > 8) return [null];
   const text = String(command ?? '');
   if (!text.trim()) return null;
@@ -118,7 +146,7 @@ function commandWrites(argv, depth) {
   if (SHELLS.has(cmd)) return shellDashC(args, depth);
   if (cmd === 'eval') {
     if (args.some((a) => a.expandable)) return [null];
-    return shellWrites(args.map((a) => a.value).join(' '), depth + 1);
+    return writesOf(args.map((a) => a.value).join(' '), depth + 1);
   }
   if (cmd === 'xargs') return xargsWrites(args, depth);
   if (cmd === 'find') return findWrites(args, depth);
@@ -155,7 +183,7 @@ function shellDashC(args, depth) {
     if (!dashC) continue;
     const script = args[i + 1];
     if (!script || script.expandable) return [null];
-    return shellWrites(script.value, depth + 1);
+    return writesOf(script.value, depth + 1);
   }
   return null;
 }
@@ -177,7 +205,7 @@ function xargsWrites(args, depth) {
   }
   if (!rest.length) return null;
   const name = baseOf(rest[0].value);
-  const nested = shellWrites(rest.map((a) => a.value).join(' '), depth + 1);
+  const nested = writesOf(rest.map((a) => a.value).join(' '), depth + 1);
   if (STDIN_WRITERS.has(name)) return nested ? [null, ...nested] : [null];
   return nested;
 }
@@ -191,7 +219,7 @@ function findWrites(args, depth) {
     if (at < 0) continue;
     const end = vals.indexOf(';', at);
     const cmdArgs = args.slice(at + 1, end === -1 ? args.length : end).filter((a) => a.value !== '{}' && a.value !== '+');
-    const nested = shellWrites(cmdArgs.map((a) => a.value).join(' '), depth + 1);
+    const nested = writesOf(cmdArgs.map((a) => a.value).join(' '), depth + 1);
     const name = baseOf(cmdArgs[0]?.value);
     if (STDIN_WRITERS.has(name)) return nested ? [null, ...nested] : [null];
     if (nested) return nested;
@@ -445,6 +473,17 @@ function gitWrites(args, depth) {
   return writes;
 }
 
+// A sync brings in the branch's own upstream, not another branch: `git pull [remote] [main|master]`,
+// `git merge --ff-only [@{u} | FETCH_HEAD | [remote/]main|master]`. Anything else is a write.
+const SYNC_REF = /^(?:@\{(?:u|upstream)\}|FETCH_HEAD|(?:[\w.-]+\/)?(?:main|master))$/;
+/** @param {Word[]} rest @param {'pull' | 'merge'} sub */
+function gitSyncs(rest, sub) {
+  if (rest.some((a) => a.expandable)) return false;
+  const refs = rest.filter((a) => !a.value.startsWith('-')).map((a) => a.value);
+  if (sub === 'pull') return refs.length <= 1 || (refs.length === 2 && /^(?:main|master)$/.test(refs[1]));
+  return refs.length === 0 || (refs.length === 1 && SYNC_REF.test(refs[0]));
+}
+
 /**
  * @param {string} sub
  * @param {Word[]} rest
@@ -466,13 +505,13 @@ function gitSub(sub, rest, depth) {
     case 'worktree': return gitWorktree(rest);
     case 'submodule': return gitSubmodule(rest, depth);
     case 'archive': return gitArchive(rest);
+    case 'pull': return gitSyncs(rest, 'pull') ? [GIT_SYNC] : [null];
+    case 'merge': return rest.some((a) => a.value === '--ff-only') && gitSyncs(rest, 'merge') ? [GIT_SYNC] : [null];
     case 'format-patch':
     case 'am':
-    case 'merge':
     case 'rebase':
     case 'cherry-pick':
     case 'revert':
-    case 'pull':
     case 'clone':
       return [null];
     default:
@@ -602,7 +641,7 @@ function gitSubmodule(rest, depth) {
   if (!sub || sub === 'status' || sub === 'summary') return null;
   if (sub === 'foreach') {
     const at = rest.findIndex((a) => a.value === 'foreach');
-    return shellWrites(rest.slice(at + 1).map((a) => a.value).join(' '), depth + 1);
+    return writesOf(rest.slice(at + 1).map((a) => a.value).join(' '), depth + 1);
   }
   return [null];
 }
@@ -734,14 +773,31 @@ function scan(command) {
     while (i < s.length && (s[i] === ' ' || s[i] === '\t' || s[i] === '\r')) i++;
   }
 
+  // The length of a home reference at i (`~`, `$HOME`, `${HOME}`) that a word starts with, or 0.
+  // It must end the word or be followed by `/`; `~user` and `$HOMEDIR` are not home.
+  function homeAt(quote, quoted) {
+    if (quote === "'") return 0;
+    let n = 0;
+    if (!quote && !quoted && s[i] === '~') n = 1;
+    else if (s.startsWith('${HOME}', i)) n = 7;
+    else if (s.startsWith('$HOME', i)) n = 5;
+    const after = s[i + n];
+    return n && (after === undefined || /[\/\s"'();|&<>]/.test(after)) ? n : 0;
+  }
+
   /** @returns {Word & { quoted: boolean }} */
   function readWord() {
     let value = '';
     let expandable = false;
     let quoted = false;
     let quote = '';
+    let home = false;
     while (i < s.length) {
       const c = s[i];
+      if (value === '') {
+        const n = homeAt(quote, quoted);
+        if (n) { value = '~'; home = true; i += n; continue; }
+      }
       if (!quote) {
         if (c === '\\') {
           i++;
@@ -772,6 +828,8 @@ function scan(command) {
       value += c;
       i++;
     }
+    // A quoted or escaped `~` is a folder named `~`, not home: keep it from reading as `~/…`.
+    if (!home && value.startsWith('~')) value = `./${value}`;
     return { value, expandable, quoted };
   }
 

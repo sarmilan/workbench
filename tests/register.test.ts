@@ -210,6 +210,41 @@ test('on main, a shell write in the repo waits for a branch, and one outside doe
   expect(edits).toEqual(['bash:echo hi > /tmp/plan.md', 'bash:git log'])
 })
 
+test('on main, syncing the branch and clearing a git lock are not refused', async ($, on) => {
+  const { edits } = briefHarness(on, { branch: 'main' })
+  for (const c of ['git pull --ff-only', 'git merge --ff-only origin/main', 'rm .git/index.lock', 'rm -f /repo/.git/refs/heads/main.lock']) {
+    expect(((await $.tool.call(bash(c))) as { deny?: string }).deny).toBeUndefined()
+  }
+  expect(edits).toEqual(['bash:git pull --ff-only', 'bash:git merge --ff-only origin/main', 'bash:rm .git/index.lock', 'bash:rm -f /repo/.git/refs/heads/main.lock'])
+  const mixed = (await $.tool.call(bash('git pull && rm src/a.ts'))) as { deny?: string }
+  expect(mixed.deny).toContain('No brief for main')
+  const merge = (await $.tool.call(bash('git merge feature'))) as { deny?: string }
+  expect(merge.deny).toContain('No brief for main')
+})
+
+test('on main, a write under HOME outside the repo is not refused', async ($, on) => {
+  const { edits } = briefHarness(on, { branch: 'main' })
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/Users/me' : undefined }))
+  const cmds = [
+    'cp ~/.claude-work/settings.json ~/.claude-work/settings.json.bak',
+    "jq '.enabledPlugins = {}' ~/.claude-work/settings.json.bak > ~/.claude-work/settings.json",
+    'rm -f "$HOME/.claude-work/x"',
+  ]
+  for (const c of cmds) expect(((await $.tool.call(bash(c))) as { deny?: string }).deny).toBeUndefined()
+  expect(edits).toEqual(cmds.map(c => `bash:${c}`))
+  const weird = (await $.tool.call(bash('echo hi > $SOMEWHERE/x'))) as { deny?: string }
+  expect(weird.deny).toContain('No brief for main')
+})
+
+test('on a feature branch, git pull still waits for the brief', async ($, on) => {
+  const { edits } = briefHarness(on)
+  const r = (await $.tool.call(bash('git pull --ff-only'))) as { deny?: string }
+  expect(r.deny).toContain('wait for the session brief')
+  // A git lock is never a code edit, brief or not.
+  await $.tool.call(bash('rm .git/index.lock'))
+  expect(edits).toEqual(['bash:rm .git/index.lock'])
+})
+
 test('the brief can be written from the shell, and its approval file cannot', async ($, on) => {
   const { base, edits } = briefHarness(on)
   await $.tool.call(bash(`cat > ${base}.md <<'EOF'\n# T\nEOF`))
@@ -883,7 +918,8 @@ for (const [name, opts, ms] of [
 
 // ── The Stop test gate ────────────────────────────────────────────────────────
 // The command itself is stubbed. bin/stopgate.mjs decides; this checks Claude's hook wires it.
-const stopHarness = (on: Parameters<Parameters<typeof test>[1]>[1], opts: { file?: string | null; exitCode?: number; stderr?: string } = {}) => {
+// `git` answers `git -C /repo <args>` by its args joined with spaces; anything else fails, as outside a repo.
+const stopHarness = (on: Parameters<Parameters<typeof test>[1]>[1], opts: { file?: string | null; exitCode?: number; stderr?: string; git?: Record<string, string> } = {}) => {
   const file = 'file' in opts ? opts.file : '{"testCommand":"npm test"}'
   const exitCode = opts.exitCode ?? 1
   const stderr = opts.stderr ?? 'not ok 1'
@@ -902,7 +938,10 @@ const stopHarness = (on: Parameters<Parameters<typeof test>[1]>[1], opts: { file
   on('process.run', (_, e) => {
     const cmd = (e.argv ?? []).join(' ')
     calls.push(cmd)
-    if (e.argv?.[0] === 'git') return { value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    if (e.argv?.[0] === 'git') {
+      const answer = opts.git?.[(e.argv ?? []).slice(3).join(' ')]
+      return { value: { exitCode: answer == null ? 1 : 0, stdout: answer ?? '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     if (cmd.includes('npm test')) return { value: { exitCode, stdout: '', stderr, isStdoutTruncated: false, isStderrTruncated: false } }
     return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -955,6 +994,47 @@ test('an explicit off switch lets Claude stop', async ($, on) => {
   const result = await $.classic.Stop(stopEvent() as never)
   expect(result).toMatchObject({ continued: true })
   expect(calls.some(c => c.includes('npm test'))).toBe(false)
+})
+
+// A checkout on `branch` whose default branch is local main, forked at `base`.
+const stopGit = (branch: string, { ahead = '0', status = '' } = {}) => ({
+  'rev-parse --show-toplevel': '/repo\n',
+  'rev-parse --path-format=absolute --git-common-dir': '/repo/.git\n',
+  'rev-parse --abbrev-ref HEAD': `${branch}\n`,
+  'rev-parse --verify --quiet main': 'abc1234\n',
+  'merge-base HEAD main': 'abc1234\n',
+  'rev-list --count abc1234..HEAD': `${ahead}\n`,
+  'status --porcelain': status,
+})
+
+test('on the default branch Claude stops without running tests', async ($, on) => {
+  const { calls } = stopHarness(on, { git: stopGit('main') })
+  const result = await $.classic.Stop(stopEvent() as never)
+  expect(result).toMatchObject({ continued: true })
+  expect(calls.some(c => c.includes('npm test'))).toBe(false)
+})
+
+test('a branch with no changes lets Claude stop', async ($, on) => {
+  const { calls } = stopHarness(on, { git: stopGit('fix/x') })
+  const clean = await $.classic.Stop(stopEvent() as never)
+  expect(clean).toMatchObject({ continued: true })
+  expect(calls.some(c => c.includes('npm test'))).toBe(false)
+})
+
+test('a branch with a commit past the merge-base is tested', async ($, on) => {
+  const { calls } = stopHarness(on, { git: stopGit('fix/x', { ahead: '1' }) })
+  const result = await $.classic.Stop(stopEvent() as never)
+  expect(result.preventContinuation).toBe(true)
+  expect(calls.some(c => c.includes('npm test'))).toBe(true)
+})
+
+test('the same failure holds Claude twice, then lets the third stop through', async ($, on) => {
+  const { calls } = stopHarness(on)
+  const stop = (n: number) => $.classic.Stop(stopEvent({ last_assistant_message: `turn ${n}` }) as never)
+  expect((await stop(1)).preventContinuation).toBe(true)
+  expect((await stop(2)).preventContinuation).toBe(true)
+  expect(await stop(3)).toMatchObject({ continued: true })
+  expect(calls.filter(c => c.includes('npm test')).length).toBe(3)
 })
 
 test('an interrupt lets Claude stop without running tests', async ($, on) => {

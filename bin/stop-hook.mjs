@@ -11,7 +11,7 @@ import * as act from './activity.mjs';
 import { handle } from './grok-hook.mjs';
 import { findAgent, railHome } from './host.mjs';
 import {
-  RUN_TIMEOUT_MS, hostReply, lockPath, performGate, projectCommand, runInProgress,
+  RUN_TIMEOUT_MS, branchChanges, hostReply, lockPath, performGate, projectCommand, runInProgress,
   sessionIdOf, shellLine, reuseDecision,
 } from './stopgate.mjs';
 
@@ -23,12 +23,13 @@ const writeJson = (p, v) => {
   writeFileSync(tmp, JSON.stringify(v));
   renameSync(tmp, p);
 };
-const git = (cwd, args) => {
-  try { return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', timeout: 5_000, stdio: ['ignore', 'pipe', 'pipe'] }).trim(); } catch { return null; }
+const git = (cwd, args, timeout = 5_000) => {
+  try { return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'pipe'] }).trim(); } catch { return null; }
 };
 
-// The project the stop is in, and the command that gates it. `root` is the git toplevel, or cwd.
-export function loadProject(cwd) {
+// The project the stop is in, the command that gates it, and what the branch changed.
+// `root` is the git toplevel, or cwd.
+export async function loadProject(cwd) {
   const dir = cwd || process.cwd();
   const top = git(dir, ['rev-parse', '--show-toplevel']);
   const root = top && top.startsWith('/') ? top.split('\n')[0] : dir;
@@ -40,12 +41,18 @@ export function loadProject(cwd) {
   const pkg = readJson(join(root, 'package.json'));
   const plugin = readJson(join(root, '.claude-plugin', 'plugin.json'));
   const hasRail = existsSync(join(root, 'bin', 'rail.mjs'));
+  const changes = top ? await branchChanges(async (args, timeout) => git(dir, args, timeout)) : null;
   const resolved = projectCommand({
     project, local, agentsText,
     packageScript: pkg?.scripts?.test,
     pluginName: plugin?.name, hasRail,
+    workspace: {
+      turbo: existsSync(join(root, 'turbo.json')),
+      pnpm: existsSync(join(root, 'pnpm-workspace.yaml')),
+      base: changes?.base,
+    },
   });
-  return { root, command: resolved.command, source: resolved.source };
+  return { root, command: resolved.command, source: resolved.source, changes };
 }
 
 function runCommand(command, root) {

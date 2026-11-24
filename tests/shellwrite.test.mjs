@@ -93,7 +93,6 @@ test('a redirect in a later segment is still a write, and a quoted one is not', 
 test('a variable or a glob is a write with no literal path', () => {
   assert.deepEqual(writes('cat > "$FILE"'), [null]);
   assert.deepEqual(writes('rm *.ts'), [null]);
-  assert.deepEqual(writes('echo hi > ~/notes'), [null]);
   assert.ok(writes('git apply /tmp/p.diff'));
   assert.deepEqual(writes('git checkout main'), [null]);
 });
@@ -123,4 +122,37 @@ test('in-place interpreters and package installs write; a print does not', () =>
   assert.equal(isWrite('find src -name "*.ts"'), false);
   assert.ok(writes('xargs rm'));
   assert.equal(isWrite('xargs grep foo'), false);
+});
+
+test('a path from home stays literal as ~/…, and resolves against HOME', () => {
+  assert.deepEqual(writes('jq . s.json > ~/.claude-work/settings.json'), ['~/.claude-work/settings.json']);
+  assert.deepEqual(writes('cp ~/.claude-work/settings.json ~/.claude-work/settings.json.bak'), ['~/.claude-work/settings.json', '~/.claude-work/settings.json.bak']);
+  assert.deepEqual(writes('rm -f "$HOME/.claude-work/x"'), ['~/.claude-work/x']);
+  assert.deepEqual(writes('echo hi > ${HOME}/notes'), ['~/notes']);
+  assert.deepEqual(writes('echo hi > "$HOME"/notes'), ['~/notes']);
+  // Another user's home, a longer variable, or a quoted ~ is not this HOME.
+  assert.deepEqual(writes('echo hi > ~bob/notes'), [null]);
+  assert.deepEqual(writes('echo hi > $HOMEDIR/notes'), [null]);
+  assert.deepEqual(writes("echo hi > '$HOME/notes'"), ['$HOME/notes']);
+  assert.deepEqual(writes('echo hi > "~/notes"'), ['./~/notes']);
+  assert.equal(resolveWritePath('/repo', '~/.claude-work/settings.json', '/Users/me'), '/Users/me/.claude-work/settings.json');
+  assert.equal(resolveWritePath('/repo', '~', '/Users/me/'), '/Users/me');
+  assert.equal(resolveWritePath('/repo', './~/notes', '/Users/me'), '/repo/~/notes');
+  // Without a home it stays inside the checkout, so the gate still refuses it.
+  assert.equal(resolveWritePath('/repo', '~/notes'), '/repo/~/notes');
+});
+
+test('git pull and a fast-forward are writes, except on a branch with no brief', () => {
+  for (const command of ['git pull', 'git pull --ff-only', 'git merge --ff-only origin/main', 'sh -c "git pull"']) {
+    assert.deepEqual(writes(command), [null], command);
+    assert.equal(shellWrites(command, { onDefault: true }), null, command);
+  }
+  assert.deepEqual(shellWrites('git merge feature', { onDefault: true }), [null]);
+  assert.deepEqual(shellWrites('git rebase origin/main', { onDefault: true }), [null]);
+  assert.deepEqual(shellWrites('git pull && rm src/a.ts', { onDefault: true }), ['src/a.ts']);
+  assert.deepEqual(shellWrites('git -C ../other pull', { onDefault: true }), [null]);
+  // Another branch landing on main is a write, not a sync.
+  assert.equal(shellWrites('git pull origin main', { onDefault: true }), null);
+  assert.deepEqual(shellWrites('git pull origin feature', { onDefault: true }), [null]);
+  assert.deepEqual(shellWrites('git merge --ff-only feature', { onDefault: true }), [null]);
 });

@@ -1,5 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { approvalRecord, briefFile, briefStatus, checkoutName, inWorkTree, mainCheckoutNote, NO_BRIEF_BRANCHES, parseBrief } from '../bin/brief.mjs'
+import { approvalRecord, briefFile, briefStatus, checkoutName, inWorkTree, isGitLock, mainCheckoutNote, NO_BRIEF_BRANCHES, parseBrief } from '../bin/brief.mjs'
 import { outsideRepoNote } from '../bin/brief-instructions.mjs'
 import * as act from './activity.ts'
 import { goAhead } from './goahead.ts'
@@ -9,7 +9,7 @@ import { keep } from '../bin/sessionstory.mjs'
 import { nextCache } from '../bin/cache.mjs'
 import { codeRun, gateReason as reviewWait, keptRuns, mergesPr, reportFromText, reviewsFile } from '../bin/cadence.mjs'
 import { resolveWritePath, shellWrites } from '../bin/shellwrite.mjs'
-import { lockPath, performGate, projectCommand, runInProgress, RUN_TIMEOUT_MS, sessionIdOf, shellLine, reuseDecision } from '../bin/stopgate.mjs'
+import { branchChanges, lockPath, performGate, projectCommand, runInProgress, RUN_TIMEOUT_MS, sessionIdOf, shellLine, reuseDecision } from '../bin/stopgate.mjs'
 
 // The controller (bin/pane.mjs) does the iTerm work; this module only decides when to call it.
 // It runs through sh so the user's PATH finds `node`; the script path is passed as an argument,
@@ -148,9 +148,10 @@ const gateReason = (b: Brief) => {
 }
 
 // Why an edit of `file` is refused, or null to let it through. The brief itself (anything under
-// .git/session-rail/) can always be written, except its approval file. On a checkout with no brief,
-// a path inside the work tree is refused; a path outside it is left alone.
+// .git/session-rail/) can always be written, except its approval file, and so can git's own lock files.
+// On a checkout with no brief, a path inside the work tree is refused; a path outside it is left alone.
 const gate = async ($: EngineInterface, tool: string, file: string) => {
+  if (isGitLock(file)) return null
   const b = await readBrief($)
   if (!b) {
     const head = await gitHead($)
@@ -169,15 +170,18 @@ const gate = async ($: EngineInterface, tool: string, file: string) => {
 
 // A shell write waits on the same gate as Edit. shellWrites names the files; a `null` entry is a write
 // whose path isn't literal, so it's treated as a file in the checkout (the person can run it themselves).
-// The refusal is the same record the rail shows as Held, and the pet's ? rather than a droop.
+// On main or master, `git pull` and `git merge --ff-only` sync the branch and aren't writes. A `~/…` path
+// resolves against HOME. The refusal is the same record the rail shows as Held, and the pet's ? rather than a droop.
 const shellGate = async ($: EngineInterface, command: string) => {
-  const targets = shellWrites(command)
-  if (!targets) return null
+  if (!shellWrites(command)) return null
   const head = await gitHead($)
+  const targets = shellWrites(command, { onDefault: Boolean(head && NO_BRIEF_BRANCHES.includes(head.branch)) })
+  if (!targets) return null
   const cwd = head?.cwd ?? (await $.session.cwd())
   const root = head?.root || cwd
+  const home = await $.env.get('HOME').catch(() => '')
   for (const target of targets) {
-    const file = target == null ? `${root}/shell-write` : resolveWritePath(cwd, target)
+    const file = target == null ? `${root}/shell-write` : resolveWritePath(cwd, target, home || '')
     if (!file) continue
     const deny = await gate($, 'Bash', file)
     if (deny) return deny
@@ -456,8 +460,9 @@ const message = (state: string, panel: Panel) => {
 
 // ── The Stop test gate (bin/stopgate.mjs) ─────────────────────────────────────
 // The command comes from the checkout's tests.json, then session-rail.json, then a command
-// named in AGENTS.md, then a real package.json test script, then this repo's own checks.
-// Nothing configured means the stop is allowed. The lock lets this hook and the command hook
+// named in AGENTS.md, then a real package.json test script (scoped to the touched packages in a
+// turbo or pnpm workspace), then this repo's own checks. Nothing configured, the default branch,
+// or a branch with nothing changed means the stop is allowed. The lock lets this hook and the command hook
 // share one run.
 const readText = async ($: EngineInterface, path: string) => {
   try { return String(await $.fs.read(path)) } catch { return null }
@@ -468,6 +473,11 @@ const readJsonFile = async ($: EngineInterface, path: string) => {
   try { return JSON.parse(text) as Record<string, unknown> } catch { return null }
 }
 const dirOf = (p: string) => p.slice(0, Math.max(0, p.lastIndexOf('/')))
+// What the branch changed against the default branch (stopgate's branchChanges), through $.process.
+const stopGit = ($: EngineInterface, cwd: string) => async (args: string[], timeoutMs = 5_000) => {
+  const r = await $.process.run(['git', '-C', cwd, ...args], { timeoutMs }).catch(() => null)
+  return r && r.exitCode === 0 ? r.stdout.trim() : null
+}
 const loadStopProject = async ($: EngineInterface) => {
   const cwd = await $.session.cwd()
   const top = await $.process.run(['git', '-C', cwd, 'rev-parse', '--show-toplevel'], { timeoutMs: 5_000 }).catch(() => null)
@@ -489,13 +499,20 @@ const loadStopProject = async ($: EngineInterface) => {
   }
   const scripts = pkg?.scripts
   const packageScript = scripts && typeof scripts === 'object' ? (scripts as { test?: unknown }).test : undefined
+  const exists = (p: string) => $.fs.exists(p).then(Boolean, () => false)
+  const [changes, turbo, pnpm] = await Promise.all([
+    topLine ? branchChanges(stopGit($, cwd)) : Promise.resolve(null),
+    exists(`${root}/turbo.json`),
+    exists(`${root}/pnpm-workspace.yaml`),
+  ])
   const resolved = projectCommand({
     project, local, agentsText,
     packageScript: typeof packageScript === 'string' ? packageScript : undefined,
     pluginName: typeof plugin?.name === 'string' ? plugin.name : undefined,
     hasRail,
+    workspace: { turbo, pnpm, base: changes?.base },
   })
-  return { root, command: resolved.command }
+  return { root, command: resolved.command, changes }
 }
 const stopOn = async ($: EngineInterface, event: Record<string, unknown>) => {
   if (await $.env.get('SESSION_RAIL_HEADLESS').catch(() => '')) return { action: 'allow' as const, quiet: true }
@@ -505,7 +522,7 @@ const stopOn = async ($: EngineInterface, event: Record<string, unknown>) => {
     if (!path) return null
     const text = await readText($, path)
     if (text == null) return null
-    try { return JSON.parse(text) as { key?: string; at?: number; done?: boolean; decision?: { action?: string; at?: number; ok?: boolean; command?: string; detail?: string; quiet?: boolean; reason?: string } } } catch { return null }
+    try { return JSON.parse(text) as { key?: string; at?: number; done?: boolean; decision?: { action?: string; at?: number; ok?: boolean; command?: string; detail?: string; quiet?: boolean; reason?: string }; streak?: { fingerprint: string; count: number } } } catch { return null }
   }
   const writeLock = async (record: unknown) => {
     if (!path) return
