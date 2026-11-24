@@ -6,8 +6,8 @@ import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { callFinished, callStarted, fresh, heard, noteReply, replied, trackTasks, turnEnded, turnStarted } from '../bin/activity.mjs';
 import { attentionFor } from '../bin/mascot.mjs';
-import { approvalRecord, briefFile, checkoutName, inWorkTree, mainCheckoutNote, parseBrief } from '../bin/brief.mjs';
-import { armTurn, chatApproval, editReason, handle, panelMessage, procedure, readBrief, schedulePublish, slashCommand, takeProcedure } from '../bin/grok-hook.mjs';
+import { approvalRecord, briefFile, checkoutName, inWorkTree, isGitLock, mainCheckoutNote, parseBrief } from '../bin/brief.mjs';
+import { armTurn, chatApproval, editReason, handle, panelMessage, procedure, readBrief, schedulePublish, shellEdit, slashCommand, takeProcedure } from '../bin/grok-hook.mjs';
 import { briefInstructions, deskOutsideNote, outsideRepoNote } from '../bin/brief-instructions.mjs';
 import { C, fg, paneBgOff, paneBgOn, usePalette } from '../bin/term.mjs';
 import { connectorsFrom, contextFrom, eventsFromText, rowFromActive, usageFromBilling } from '../bin/sources.mjs';
@@ -89,6 +89,38 @@ test('on main a repo edit is refused and names the branch and the brief', () => 
   assert.match(mainCheckoutNote('detached'), /detached HEAD/);
   assert.match(editReason(brief, '/repo/a.js'), /wait for the session brief/);
   assert.equal(editReason({ ...brief, approval: { approvedAt: 1 } }, '/repo/a.js'), null);
+});
+
+test('on main Grok may sync the branch, clear a git lock, and write under HOME', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'grok-main-'));
+  const home = mkdtempSync(join(tmpdir(), 'grok-home-'));
+  const previous = process.env.HOME;
+  try {
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    execFileSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=T', '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'base'], { cwd: dir });
+    process.env.HOME = home;
+    assert.equal(isGitLock('/repo/.git/index.lock'), true);
+    assert.equal(isGitLock('.git/refs/heads/main.lock'), true);
+    assert.equal(isGitLock('/repo/.git/worktrees/x/index.lock'), true);
+    assert.equal(isGitLock('/repo/pnpm-lock.yaml'), false);
+    assert.equal(isGitLock('/repo/src/file.lock'), false);
+    assert.equal(isGitLock('/repo/.github/x.lock'), false);
+    assert.equal(editReason(null, '/repo/.git/index.lock', { branch: 'main', cwd: '/repo' }), null);
+    assert.equal(shellEdit(dir, 'git pull --ff-only'), null);
+    assert.equal(shellEdit(dir, 'git merge --ff-only origin/main'), null);
+    assert.equal(shellEdit(dir, 'rm .git/index.lock'), null);
+    assert.equal(shellEdit(dir, 'cp ~/.claude-work/settings.json ~/.claude-work/settings.json.bak'), null);
+    assert.equal(shellEdit(dir, 'jq . x > "$HOME/.claude-work/settings.json"'), null);
+    assert.match(shellEdit(dir, 'git pull && rm src/a.ts').reason, /No brief for main/);
+    assert.match(shellEdit(dir, 'echo hi > src/a.ts').reason, /No brief for main/);
+    execFileSync('git', ['switch', '-q', '-c', 'feature/x'], { cwd: dir });
+    assert.match(shellEdit(dir, 'git pull --ff-only').reason, /wait for the session brief/);
+  } finally {
+    if (previous == null) delete process.env.HOME;
+    else process.env.HOME = previous;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('outside a repo the agent is told the desk cannot see a brief in another folder', () => {

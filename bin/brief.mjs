@@ -8,6 +8,7 @@
 // Its sections are fixed headings (## Problem, Solution, Design, Mockups, Engineering). Engineering holds
 // "### Chunk N: name" blocks, each an outline plus, once built, "Done: summary" and "Files: a, b".
 // main/master and a detached HEAD have no brief. A repo edit there is refused until the work is on a branch.
+// Git's own lock files are never a code edit (isGitLock).
 
 export const BRIEF_SECTIONS = ['problem', 'solution', 'design', 'mockups', 'engineering'];
 export const NO_BRIEF_BRANCHES = ['main', 'master', 'HEAD', 'detached'];
@@ -47,6 +48,14 @@ export function inWorkTree(root, file) {
   if (!file.startsWith('/')) return true;
   const base = root.endsWith('/') ? root.slice(0, -1) : root;
   return file === base || file.startsWith(`${base}/`);
+}
+
+/**
+ * True for git's own lock files (`.git/index.lock`, `.git/refs/heads/main.lock`, a worktree's
+ * `.git/worktrees/x/index.lock`). Clearing a stale one is repo maintenance, not a code edit.
+ */
+export function isGitLock(file) {
+  return typeof file === 'string' && /(?:^|\/)\.git\/(?:[^/]+\/)*[^/]+\.lock$/.test(file);
 }
 
 /** @param {string} common the git common dir @param {string} branch @param {'md' | 'approved.json'} ext */

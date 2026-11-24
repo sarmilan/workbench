@@ -210,6 +210,41 @@ test('on main, a shell write in the repo waits for a branch, and one outside doe
   expect(edits).toEqual(['bash:echo hi > /tmp/plan.md', 'bash:git log'])
 })
 
+test('on main, syncing the branch and clearing a git lock are not refused', async ($, on) => {
+  const { edits } = briefHarness(on, { branch: 'main' })
+  for (const c of ['git pull --ff-only', 'git merge --ff-only origin/main', 'rm .git/index.lock', 'rm -f /repo/.git/refs/heads/main.lock']) {
+    expect(((await $.tool.call(bash(c))) as { deny?: string }).deny).toBeUndefined()
+  }
+  expect(edits).toEqual(['bash:git pull --ff-only', 'bash:git merge --ff-only origin/main', 'bash:rm .git/index.lock', 'bash:rm -f /repo/.git/refs/heads/main.lock'])
+  const mixed = (await $.tool.call(bash('git pull && rm src/a.ts'))) as { deny?: string }
+  expect(mixed.deny).toContain('No brief for main')
+  const merge = (await $.tool.call(bash('git merge feature'))) as { deny?: string }
+  expect(merge.deny).toContain('No brief for main')
+})
+
+test('on main, a write under HOME outside the repo is not refused', async ($, on) => {
+  const { edits } = briefHarness(on, { branch: 'main' })
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/Users/me' : undefined }))
+  const cmds = [
+    'cp ~/.claude-work/settings.json ~/.claude-work/settings.json.bak',
+    "jq '.enabledPlugins = {}' ~/.claude-work/settings.json.bak > ~/.claude-work/settings.json",
+    'rm -f "$HOME/.claude-work/x"',
+  ]
+  for (const c of cmds) expect(((await $.tool.call(bash(c))) as { deny?: string }).deny).toBeUndefined()
+  expect(edits).toEqual(cmds.map(c => `bash:${c}`))
+  const weird = (await $.tool.call(bash('echo hi > $SOMEWHERE/x'))) as { deny?: string }
+  expect(weird.deny).toContain('No brief for main')
+})
+
+test('on a feature branch, git pull still waits for the brief', async ($, on) => {
+  const { edits } = briefHarness(on)
+  const r = (await $.tool.call(bash('git pull --ff-only'))) as { deny?: string }
+  expect(r.deny).toContain('wait for the session brief')
+  // A git lock is never a code edit, brief or not.
+  await $.tool.call(bash('rm .git/index.lock'))
+  expect(edits).toEqual(['bash:rm .git/index.lock'])
+})
+
 test('the brief can be written from the shell, and its approval file cannot', async ($, on) => {
   const { base, edits } = briefHarness(on)
   await $.tool.call(bash(`cat > ${base}.md <<'EOF'\n# T\nEOF`))

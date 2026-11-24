@@ -1,5 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { approvalRecord, briefFile, briefStatus, checkoutName, inWorkTree, mainCheckoutNote, NO_BRIEF_BRANCHES, parseBrief } from '../bin/brief.mjs'
+import { approvalRecord, briefFile, briefStatus, checkoutName, inWorkTree, isGitLock, mainCheckoutNote, NO_BRIEF_BRANCHES, parseBrief } from '../bin/brief.mjs'
 import { outsideRepoNote } from '../bin/brief-instructions.mjs'
 import * as act from './activity.ts'
 import { goAhead } from './goahead.ts'
@@ -148,9 +148,10 @@ const gateReason = (b: Brief) => {
 }
 
 // Why an edit of `file` is refused, or null to let it through. The brief itself (anything under
-// .git/session-rail/) can always be written, except its approval file. On a checkout with no brief,
-// a path inside the work tree is refused; a path outside it is left alone.
+// .git/session-rail/) can always be written, except its approval file, and so can git's own lock files.
+// On a checkout with no brief, a path inside the work tree is refused; a path outside it is left alone.
 const gate = async ($: EngineInterface, tool: string, file: string) => {
+  if (isGitLock(file)) return null
   const b = await readBrief($)
   if (!b) {
     const head = await gitHead($)
@@ -169,15 +170,18 @@ const gate = async ($: EngineInterface, tool: string, file: string) => {
 
 // A shell write waits on the same gate as Edit. shellWrites names the files; a `null` entry is a write
 // whose path isn't literal, so it's treated as a file in the checkout (the person can run it themselves).
-// The refusal is the same record the rail shows as Held, and the pet's ? rather than a droop.
+// On main or master, `git pull` and `git merge --ff-only` sync the branch and aren't writes. A `~/…` path
+// resolves against HOME. The refusal is the same record the rail shows as Held, and the pet's ? rather than a droop.
 const shellGate = async ($: EngineInterface, command: string) => {
-  const targets = shellWrites(command)
-  if (!targets) return null
+  if (!shellWrites(command)) return null
   const head = await gitHead($)
+  const targets = shellWrites(command, { onDefault: Boolean(head && NO_BRIEF_BRANCHES.includes(head.branch)) })
+  if (!targets) return null
   const cwd = head?.cwd ?? (await $.session.cwd())
   const root = head?.root || cwd
+  const home = await $.env.get('HOME').catch(() => '')
   for (const target of targets) {
-    const file = target == null ? `${root}/shell-write` : resolveWritePath(cwd, target)
+    const file = target == null ? `${root}/shell-write` : resolveWritePath(cwd, target, home || '')
     if (!file) continue
     const deny = await gate($, 'Bash', file)
     if (deny) return deny
