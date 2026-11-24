@@ -292,13 +292,17 @@ const SHA = /^[0-9a-f]{7,40}$/;
 
 /**
  * In a workspace repo the package fallback tests the packages the branch touched (and what depends on
- * them), never the whole tree. null outside a workspace, or without a merge-base to filter from.
+ * them), never the whole tree. Only when the root script already fans out that way (`turbo run test`,
+ * `pnpm -r test`), so the filtered command runs the same tasks; any other root script runs as written.
+ * null outside a workspace, or without a merge-base to filter from.
  * @param {{ turbo?: boolean, pnpm?: boolean, base?: string | null }} workspace
+ * @param {string} [script] the root package.json test script
  */
-export function workspaceTestCommand({ turbo, pnpm, base } = {}) {
+export function workspaceTestCommand({ turbo, pnpm, base } = {}, script = '') {
   if (!base || !SHA.test(base)) return null;
-  if (turbo) return `npx turbo run test --filter=...[${base}]`;
-  if (pnpm) return `pnpm -r --filter "...[${base}]" test`;
+  const s = String(script || '');
+  if (turbo && /\bturbo\b/.test(s)) return `npx turbo run test --filter=...[${base}]`;
+  if (pnpm && /\bpnpm\b.*\s(?:-r|--recursive)\b/.test(s)) return `pnpm -r --filter "...[${base}]" test`;
   return null;
 }
 
@@ -374,7 +378,7 @@ export function resolveTestCommand({ setting, agentsText, packageScript, repoDef
   const agents = commandFromAgents(agentsText);
   if (agents) return { command: agents, source: 'agents' };
   const pkg = packageTestCommand(packageScript);
-  const scoped = pkg && workspaceTestCommand(workspace);
+  const scoped = pkg && workspaceTestCommand(workspace, packageScript);
   if (scoped) return { command: scoped, source: 'workspace' };
   if (pkg) return { command: pkg, source: 'package' };
   if (typeof repoDefault === 'string' && repoDefault.trim()) return { command: repoDefault.trim(), source: 'default' };
@@ -423,7 +427,7 @@ export function failureFingerprint(text) {
   return String(text ?? '')
     .replace(/\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?/g, '<time>')
     .replace(/\b\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\b/g, '<time>')
-    .replace(/\b\d+(?:\.\d+)?\s?(?:ms|s|sec|secs|seconds?|m|min|mins|minutes?|h)\b/gi, '<dur>')
+    .replace(/\b\d+(?:\.\d+)?\s?(?:ms|s|secs?|seconds?|mins?|minutes?)\b|\b\d+(?:\.\d+)?[mh]\b/gi, '<dur>')
     .replace(/[ \t]+/g, ' ')
     .trim();
 }

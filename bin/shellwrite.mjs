@@ -60,7 +60,7 @@ export function resolveWritePath(cwd, target, home) {
   return `/${parts.join('/')}`;
 }
 
-// `git pull` and `git merge --ff-only` bring the checked-out branch up to date. Inside the scan they
+// `git pull` and `git merge --ff-only` from the branch's upstream (gitSyncs) bring the checked-out branch up to date. Inside the scan they
 // are this marker (no path holds a NUL), and shellWrites decides at the top what it means.
 const GIT_SYNC = '\0git-sync';
 
@@ -473,6 +473,17 @@ function gitWrites(args, depth) {
   return writes;
 }
 
+// A sync brings in the branch's own upstream, not another branch: `git pull [remote] [main|master]`,
+// `git merge --ff-only [@{u} | FETCH_HEAD | [remote/]main|master]`. Anything else is a write.
+const SYNC_REF = /^(?:@\{(?:u|upstream)\}|FETCH_HEAD|(?:[\w.-]+\/)?(?:main|master))$/;
+/** @param {Word[]} rest @param {'pull' | 'merge'} sub */
+function gitSyncs(rest, sub) {
+  if (rest.some((a) => a.expandable)) return false;
+  const refs = rest.filter((a) => !a.value.startsWith('-')).map((a) => a.value);
+  if (sub === 'pull') return refs.length <= 1 || (refs.length === 2 && /^(?:main|master)$/.test(refs[1]));
+  return refs.length === 0 || (refs.length === 1 && SYNC_REF.test(refs[0]));
+}
+
 /**
  * @param {string} sub
  * @param {Word[]} rest
@@ -494,8 +505,8 @@ function gitSub(sub, rest, depth) {
     case 'worktree': return gitWorktree(rest);
     case 'submodule': return gitSubmodule(rest, depth);
     case 'archive': return gitArchive(rest);
-    case 'pull': return [GIT_SYNC];
-    case 'merge': return rest.some((a) => a.value === '--ff-only') ? [GIT_SYNC] : [null];
+    case 'pull': return gitSyncs(rest, 'pull') ? [GIT_SYNC] : [null];
+    case 'merge': return rest.some((a) => a.value === '--ff-only') && gitSyncs(rest, 'merge') ? [GIT_SYNC] : [null];
     case 'format-patch':
     case 'am':
     case 'rebase':

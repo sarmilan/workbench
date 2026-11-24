@@ -522,7 +522,7 @@ const stopOn = async ($: EngineInterface, event: Record<string, unknown>) => {
     if (!path) return null
     const text = await readText($, path)
     if (text == null) return null
-    try { return JSON.parse(text) as { key?: string; at?: number; done?: boolean; decision?: { action?: string; at?: number; ok?: boolean; command?: string; detail?: string; quiet?: boolean; reason?: string } } } catch { return null }
+    try { return JSON.parse(text) as { key?: string; at?: number; done?: boolean; decision?: { action?: string; at?: number; ok?: boolean; command?: string; detail?: string; quiet?: boolean; reason?: string }; streak?: { fingerprint: string; count: number } } } catch { return null }
   }
   const writeLock = async (record: unknown) => {
     if (!path) return

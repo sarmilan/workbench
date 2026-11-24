@@ -151,4 +151,8 @@ test('git pull and a fast-forward are writes, except on a branch with no brief',
   assert.deepEqual(shellWrites('git rebase origin/main', { onDefault: true }), [null]);
   assert.deepEqual(shellWrites('git pull && rm src/a.ts', { onDefault: true }), ['src/a.ts']);
   assert.deepEqual(shellWrites('git -C ../other pull', { onDefault: true }), [null]);
+  // Another branch landing on main is a write, not a sync.
+  assert.equal(shellWrites('git pull origin main', { onDefault: true }), null);
+  assert.deepEqual(shellWrites('git pull origin feature', { onDefault: true }), [null]);
+  assert.deepEqual(shellWrites('git merge --ff-only feature', { onDefault: true }), [null]);
 });

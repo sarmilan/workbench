@@ -105,6 +105,7 @@ test('on main Grok may sync the branch, clear a git lock, and write under HOME',
     assert.equal(isGitLock('/repo/pnpm-lock.yaml'), false);
     assert.equal(isGitLock('/repo/src/file.lock'), false);
     assert.equal(isGitLock('/repo/.github/x.lock'), false);
+    assert.equal(isGitLock('/repo/.git/../yarn.lock'), false);
     assert.equal(editReason(null, '/repo/.git/index.lock', { branch: 'main', cwd: '/repo' }), null);
     assert.equal(shellEdit(dir, 'git pull --ff-only'), null);
     assert.equal(shellEdit(dir, 'git merge --ff-only origin/main'), null);

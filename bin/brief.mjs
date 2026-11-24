@@ -53,9 +53,11 @@ export function inWorkTree(root, file) {
 /**
  * True for git's own lock files (`.git/index.lock`, `.git/refs/heads/main.lock`, a worktree's
  * `.git/worktrees/x/index.lock`). Clearing a stale one is repo maintenance, not a code edit.
+ * A path with `.` or `..` segments is not one: `/repo/.git/../yarn.lock` is a work-tree file.
  */
 export function isGitLock(file) {
-  return typeof file === 'string' && /(?:^|\/)\.git\/(?:[^/]+\/)*[^/]+\.lock$/.test(file);
+  return typeof file === 'string' && !/(?:^|\/)\.\.?(?:\/|$)/.test(file)
+    && /(?:^|\/)\.git\/(?:[^/]+\/)*[^/]+\.lock$/.test(file);
 }
 
 /** @param {string} common the git common dir @param {string} branch @param {'md' | 'approved.json'} ext */

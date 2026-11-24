@@ -350,8 +350,11 @@ test('with nothing changed, the gate does not run the command', async () => {
 
 test('a workspace repo tests only the packages the branch touched', () => {
   const base = 'a1b2c3d4e5f6';
-  assert.equal(workspaceTestCommand({ turbo: true, pnpm: true, base }), `npx turbo run test --filter=...[${base}]`);
-  assert.equal(workspaceTestCommand({ pnpm: true, base }), `pnpm -r --filter "...[${base}]" test`);
+  assert.equal(workspaceTestCommand({ turbo: true, pnpm: true, base }, 'turbo run test'), `npx turbo run test --filter=...[${base}]`);
+  assert.equal(workspaceTestCommand({ pnpm: true, base }, 'pnpm -r test'), `pnpm -r --filter "...[${base}]" test`);
+  // A root script that doesn't fan out through turbo or pnpm -r runs as written.
+  assert.equal(workspaceTestCommand({ turbo: true, pnpm: true, base }, 'vitest run'), null);
+  assert.deepEqual(resolveTestCommand({ packageScript: 'vitest run', workspace: { turbo: true, base } }), { command: 'npm test', source: 'package' });
   assert.equal(workspaceTestCommand({ base }), null);
   assert.equal(workspaceTestCommand({ turbo: true, base: null }), null);
   assert.equal(workspaceTestCommand({ turbo: true, base: 'main; rm -rf /' }), null);
@@ -428,6 +431,7 @@ test('a turbo or pnpm workspace filters the package test from the merge-base', a
     assert.equal(turbo.command, `npx turbo run test --filter=...[${base}]`);
     assert.equal(turbo.changes.base, base);
     rmSync(join(dir, 'turbo.json'));
+    writeFileSync(join(dir, 'package.json'), '{"scripts":{"test":"pnpm -r test"}}\n');
     const pnpm = await loadProject(dir);
     assert.equal(pnpm.command, `pnpm -r --filter "...[${base}]" test`);
   } finally {
@@ -450,6 +454,7 @@ test('a fingerprint ignores durations and timestamps, and nothing else', () => {
   assert.equal(failureFingerprint('not ok 1 (12ms) at 2026-11-24T10:00:01Z'), failureFingerprint('not ok 1 (9 ms) at 2026-11-24T11:22:33Z'));
   assert.notEqual(failureFingerprint('Failed: ledger-infra#test'), failureFingerprint('Failed: ledger-d1-backup#test'));
   assert.notEqual(failureFingerprint('not ok 1'), failureFingerprint('not ok 2'));
+  assert.notEqual(failureFingerprint('expected 5 m got 3 m'), failureFingerprint('expected 5 m got 4 m'));
 });
 
 test('the same failure holds twice, is let through once with a note, then quietly; a change or a pass starts over', () => {
