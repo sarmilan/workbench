@@ -200,7 +200,7 @@ The desk opens on Plan. A change of the plan selects Plan again. Diff and Review
 
 ### The session brief
 
-On any branch but `main` or `master`, Claude or Grok keeps a brief for the branch: what the session sets out to do, and what the work is checked against at the end. It lives inside `.git` (`.git/session-rail/briefs/`), so it's never committed. On `main`, `master`, or a detached HEAD there is no brief. Claude and Grok are told to create a branch first, and an edit of a file in the repo — including a shell command that writes one — is refused until that branch has a brief you have approved in the Plan tab. A file outside the repo is left alone.
+On any branch but `main` or `master`, Claude or Grok keeps a brief for the branch: what the session sets out to do, and what the work is checked against at the end. It lives inside `.git` (`.git/session-rail/briefs/`), so it's never committed. On `main`, `master`, or a detached HEAD there is no brief. Claude and Grok are told to create a branch first, and an edit of a file in the repo — including a shell command that writes one — is refused until that branch has a brief you have approved in the Plan tab. A file outside the repo is left alone, including a shell path that starts with `~`, `$HOME` or `${HOME}`. Keeping the default branch current is not an edit: `git pull` and `git merge --ff-only` run there. Clearing one of git's lock files (`rm .git/index.lock`) runs on any branch.
 
 The desk reads the folder the session was started in. A session started in a parent of this repo is not in a repo, so its Plan tab has no brief, and a brief written here does not show on that desk. The agent says the plan is in the Plan tab only after a frame of that desk shows the brief.
 
@@ -271,17 +271,17 @@ The gate only covers commands Claude runs, so you can always merge yourself. A `
 
 ## Tests before a stop
 
-When a turn ends, a Stop hook can run the project's tests and send the agent back if they fail. The same rules run for Claude and for Grok. Nothing is run, and the stop is allowed, when no test command is configured, so a folder with no tests is never blocked.
+When a turn ends, a Stop hook can run the project's tests and send the agent back if they fail. The same rules run for Claude and for Grok. Nothing is run, and the stop is allowed, when no test command is configured, so a folder with no tests is never blocked. Nothing is run on the default branch either (`origin/HEAD`, else `main` or `master`), or on a branch with no commits past its merge-base and a clean tree: the session has changed nothing to test.
 
 The command is chosen in this order:
 
 1. This checkout, `.git/session-rail/tests.json`: `{ "command": "npm test" }`, or `{ "command": false }` to turn the gate off here without changing the project.
 2. `session-rail.json` at the repo root: `{ "testCommand": "npm test" }`, or `{ "testCommand": false }` to turn the gate off for the project.
 3. A command named in the host project's `AGENTS.md`, the git toplevel of the session. The hook uses the first fence tagged `test` (one command per line, joined with `&&`), otherwise a line such as `Tests: npm test` or `- Run tests: \`npm test\``, otherwise the first command under a heading named Tests. It takes a command only from those shapes, so a file that only discusses tests leaves the stop alone.
-4. `npm test`, when `package.json` has a real `scripts.test`. npm's placeholder (`no test specified`) does not count.
+4. `npm test`, when `package.json` has a real `scripts.test`. npm's placeholder (`no test specified`) does not count. In a workspace repo it tests only the packages the branch touched (and what depends on them), from the merge-base: `npx turbo run test --filter=...[<merge-base>]` when there is a `turbo.json`, else `pnpm -r --filter "...[<merge-base>]" test` when there is a `pnpm-workspace.yaml`.
 5. In this Workbench repo only, when nothing above names a command: `claude plugin test .` and the frame checks from the dev notes. This repo's `AGENTS.md` names a command, so the hook runs that fence, which starts with `claude plugin validate .`.
 
-A failing command blocks the stop once. Claude's hook exits 2 and the reason on stderr is what Claude is told. Grok gets the same reason as a block decision and exits 0, which is how its hooks report a block. The reason includes the tail of the test output. If this stop is already a continuation (`stop_hook_active`), the hook exits 0 and does not block again, so it cannot loop. A turn the person interrupted is left alone.
+A failing command blocks the stop once. Claude's hook exits 2 and the reason on stderr is what Claude is told. Grok gets the same reason as a block decision and exits 0, which is how its hooks report a block. The reason includes the tail of the test output. If this stop is already a continuation (`stop_hook_active`), the hook exits 0 and does not block again, so it cannot loop. A turn the person interrupted is left alone. The same failure (its output with durations and timestamps stripped, so a cached turbo replay matches) holds at most two stops in a row. The third is let through with one note, which Claude shows as a system message. Later ones are let through quietly until the result changes, and the rail still shows the failure.
 
 The rail shows one line, `tests failed`, and the pet flinches and droops the way it does when a tool fails. A later pass clears both. There is no separate mark for the gate.
 
