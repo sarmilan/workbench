@@ -2,7 +2,8 @@
 // hook (bin/stop-hook.mjs) both follow it. A stop is held when the project's test command fails,
 // once. stop_hook_active, an interrupt, or no command at all lets it through, so a folder with
 // nothing configured is never blocked and a block cannot loop. The default branch, and a branch
-// with nothing changed against it, are not tested at all.
+// with nothing changed against it, are not tested at all. The same failure holds at most MAX_HOLDS
+// stops in a row.
 //
 // commandFromAgents reads a test command from the project's AGENTS.md. A fence tagged test,
 // then a Tests: line, then the first command under a Tests heading. Prose is not a command,
@@ -310,20 +311,29 @@ export function isDefaultBranch(branch, defaultRef) {
 const DEFAULT_CANDIDATES = ['origin/main', 'origin/master', 'main', 'master'];
 
 /**
+ * The default branch's ref: origin/HEAD, else the first of main/master that exists (remote, then local).
+ * The one rule, shared by sources.mjs (the rail and the desk) and branchChanges here.
+ * `git(args)` resolves trimmed stdout, or null on failure.
+ * @param {(args: string[]) => Promise<string | null>} git
+ */
+export async function defaultRef(git) {
+  const head = await git(['rev-parse', '--abbrev-ref', 'origin/HEAD']);
+  for (const c of new Set([head, ...DEFAULT_CANDIDATES].filter(Boolean))) {
+    if ((await git(['rev-parse', '--verify', '--quiet', c])) != null) return c;
+  }
+  return null;
+}
+
+/**
  * What the branch changed against the default branch, for skipReason and the workspace filter.
  * `git(args, timeoutMs)` runs git in the checkout and resolves its trimmed stdout, or null on failure;
- * each host passes its own runner. The default branch follows sources.mjs defaultBranch: origin/HEAD,
- * else main/master (remote, then local). null outside a git checkout.
+ * each host passes its own runner. The default branch is defaultRef's. null outside a git checkout.
  * @param {(args: string[], timeoutMs?: number) => Promise<string | null>} git
  */
 export async function branchChanges(git) {
   const branch = await git(['rev-parse', '--abbrev-ref', 'HEAD']);
   if (!branch) return null;
-  let ref = null;
-  const head = await git(['rev-parse', '--abbrev-ref', 'origin/HEAD']);
-  for (const c of new Set([head, ...DEFAULT_CANDIDATES].filter(Boolean))) {
-    if ((await git(['rev-parse', '--verify', '--quiet', c])) != null) { ref = c; break; }
-  }
+  const ref = await defaultRef(git);
   if (!ref) return { branch, onDefault: false, base: null, ahead: null, dirty: null };
   if (isDefaultBranch(branch, ref)) return { branch, onDefault: true, base: null, ahead: null, dirty: null };
   const base = await git(['merge-base', 'HEAD', ref]);
@@ -399,15 +409,54 @@ export function tailText(output, lines = 30, chars = 1000) {
   return tail.slice(-chars);
 }
 
+// How many stops in a row the same failure holds. The next identical one is let through with a note.
+export const MAX_HOLDS = 2;
+
+const shownCommand = (command) => (command.length > 180 ? `${command.slice(0, 177)}…` : command);
+
+/**
+ * What makes two failures the same result: the output tail without durations and timestamps, which
+ * change on every run (turbo's `Time: 4.529s`, a test's `(12ms)`) even when nothing else does.
+ * @param {string} text
+ */
+export function failureFingerprint(text) {
+  return String(text ?? '')
+    .replace(/\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?/g, '<time>')
+    .replace(/\b\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\b/g, '<time>')
+    .replace(/\b\d+(?:\.\d+)?\s?(?:ms|s|sec|secs|seconds?|m|min|mins|minutes?|h)\b/gi, '<dur>')
+    .replace(/[ \t]+/g, ' ')
+    .trim();
+}
+
 function block(command, detail, why) {
-  const shown = command.length > 180 ? `${command.slice(0, 177)}…` : command;
-  const head = `session-rail: tests failed (${shown}). The stop is held. Fix the failures and finish again.`;
+  const head = `session-rail: tests failed (${shownCommand(command)}). The stop is held. Fix the failures and finish again.`;
   const reason = detail ? `${head}\n${detail}` : head;
   const line = detail.split('\n').map((l) => l.trim()).filter(Boolean)[0] || '';
   return {
     action: 'block', quiet: false, why, reason: reason.slice(0, 2500), ok: false,
     command, detail: clean(line).replace(/\s+/g, ' ').trim().slice(0, 200), at: 0,
+    fingerprint: `${why}\n${failureFingerprint(detail)}`,
   };
+}
+
+/**
+ * The same failure is held MAX_HOLDS stops in a row, then let through: holding again can't help, and a
+ * cached suite (turbo) replays it exactly. The first one let through carries a note, the rest none.
+ * A pass, or a different failure, starts over. `streak` is `{ fingerprint, count }` from the lock record.
+ * @returns {{ decision: object, streak: { fingerprint: string, count: number } }}
+ */
+export function repeatDecision(decision, streak) {
+  if (!decision || decision.action !== 'block' || !decision.fingerprint) {
+    return { decision, streak: { fingerprint: '', count: 0 } };
+  }
+  const same = streak && streak.fingerprint === decision.fingerprint;
+  const count = same ? (Number(streak.count) || 0) + 1 : 1;
+  const next = { fingerprint: decision.fingerprint, count };
+  if (count <= MAX_HOLDS) return { decision, streak: next };
+  const note = count === MAX_HOLDS + 1
+    ? `session-rail: tests failed (${shownCommand(decision.command)}) with the same result as the last ${MAX_HOLDS} held stops. Not holding again until the result changes.`
+    : '';
+  return { decision: { ...decision, action: 'allow', why: 'repeat', reason: '', note }, streak: next };
 }
 
 // `exitCode` 0 allows. A timeout, a spawn error, or any other status blocks.
@@ -455,17 +504,24 @@ export async function performGate(event, io) {
     const waited = await io.wait(key);
     if (waited) return waited;
   }
-  try { await io.writeLock({ key, at: now, done: false }); } catch { /* the run still happens */ }
+  // The streak outlives each stop's record, so it is carried into every write.
+  const streak = prior?.streak;
+  try { await io.writeLock({ key, at: now, done: false, streak }); } catch { /* the run still happens */ }
   const result = await io.run(command, root);
-  const decision = { ...gateDecision({ command, ...result }), at: io.now() };
-  try { await io.writeLock({ key, at: decision.at, done: true, decision }); } catch { /* the reply still stands */ }
+  const repeated = repeatDecision({ ...gateDecision({ command, ...result }), at: io.now() }, streak);
+  const decision = repeated.decision;
+  try { await io.writeLock({ key, at: decision.at, done: true, decision, streak: repeated.streak }); } catch { /* the reply still stands */ }
   return decision;
 }
 
 // Claude's command hook blocks with exit 2 and the reason on stderr. Grok's hook prints a block
 // decision and exits 0 (a non-zero exit is how a broken Grok hook fails open). Neither sets
 // `continue: false`, which would end the turn instead of sending the agent back.
+// A stop let through with a note (repeatDecision) shows it to the person on Claude as a systemMessage.
 export function hostReply(host, decision) {
+  if (decision?.action === 'allow' && decision.note && host !== 'grok') {
+    return { exitCode: 0, stdout: JSON.stringify({ systemMessage: decision.note }), stderr: '' };
+  }
   if (!decision || decision.action !== 'block') return { exitCode: 0, stdout: '', stderr: '' };
   const stdout = JSON.stringify({ decision: 'block', reason: decision.reason });
   if (host === 'grok') return { exitCode: 0, stdout, stderr: '' };

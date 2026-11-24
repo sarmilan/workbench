@@ -10,8 +10,9 @@ import { noteTests, fresh } from '../bin/activity.mjs';
 import { droopFor } from '../bin/mascot.mjs';
 import { loadProject, runStop } from '../bin/stop-hook.mjs';
 import {
-  commandFromAgents, gateDecision, hostReply, isDefaultBranch, packageTestCommand, performGate, projectCommand,
-  resolveTestCommand, settingFrom, skipReason, stopHookActive, wasInterrupted, workspaceTestCommand,
+  MAX_HOLDS, commandFromAgents, failureFingerprint, gateDecision, hostReply, isDefaultBranch, packageTestCommand,
+  performGate, projectCommand, repeatDecision, resolveTestCommand, settingFrom, skipReason, stopHookActive,
+  wasInterrupted, workspaceTestCommand,
 } from '../bin/stopgate.mjs';
 
 const HOOK = new URL('../bin/stop-hook.mjs', import.meta.url).pathname;
@@ -429,6 +430,102 @@ test('a turbo or pnpm workspace filters the package test from the merge-base', a
     rmSync(join(dir, 'turbo.json'));
     const pnpm = await loadProject(dir);
     assert.equal(pnpm.command, `pnpm -r --filter "...[${base}]" test`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── The same result, held at most MAX_HOLDS stops in a row ────────────────────
+
+const TURBO_FAIL = (time) => [
+  ' Tasks:    47 successful, 57 total',
+  'Cached:    47 cached, 57 total',
+  `  Time:    ${time}`,
+  'Failed:    ledger-infra#test',
+  ' ERROR  run failed: command  exited (1)',
+].join('\n');
+
+test('a fingerprint ignores durations and timestamps, and nothing else', () => {
+  assert.equal(failureFingerprint(TURBO_FAIL('4.529s')), failureFingerprint(TURBO_FAIL('3.1s')));
+  assert.equal(failureFingerprint('not ok 1 (12ms) at 2026-11-24T10:00:01Z'), failureFingerprint('not ok 1 (9 ms) at 2026-11-24T11:22:33Z'));
+  assert.notEqual(failureFingerprint('Failed: ledger-infra#test'), failureFingerprint('Failed: ledger-d1-backup#test'));
+  assert.notEqual(failureFingerprint('not ok 1'), failureFingerprint('not ok 2'));
+});
+
+test('the same failure holds twice, is let through once with a note, then quietly; a change or a pass starts over', () => {
+  assert.equal(MAX_HOLDS, 2);
+  const fail = (time) => gateDecision({ command: 'npm test', exitCode: 1, output: TURBO_FAIL(time) });
+  let streak;
+  const step = (decision) => { const r = repeatDecision(decision, streak); streak = r.streak; return r.decision; };
+  assert.equal(step(fail('4.5s')).action, 'block');
+  assert.equal(step(fail('4.6s')).action, 'block');
+  const third = step(fail('4.4s'));
+  assert.equal(third.action, 'allow');
+  assert.equal(third.why, 'repeat');
+  assert.equal(third.ok, false, 'the rail still shows the failure');
+  assert.match(third.note, /same result as the last 2 held stops/);
+  const fourth = step(fail('4.2s'));
+  assert.equal(fourth.action, 'allow');
+  assert.equal(fourth.note, '');
+  const other = step(gateDecision({ command: 'npm test', exitCode: 1, output: 'Failed: ledger-d1-backup#test' }));
+  assert.equal(other.action, 'block', 'a different failure holds again');
+  const pass = step(gateDecision({ command: 'npm test', exitCode: 0, output: '' }));
+  assert.equal(pass.action, 'allow');
+  assert.deepEqual(streak, { fingerprint: '', count: 0 });
+  assert.equal(step(fail('1s')).action, 'block', 'after a pass the same failure holds again');
+});
+
+test('the note reaches Claude as a system message and leaves Grok alone', () => {
+  const allowed = { action: 'allow', why: 'repeat', note: 'session-rail: tests failed (npm test) with the same result.' };
+  const claude = hostReply('claude', allowed);
+  assert.equal(claude.exitCode, 0);
+  assert.equal(claude.stderr, '');
+  assert.equal(JSON.parse(claude.stdout).systemMessage, allowed.note);
+  assert.deepEqual(hostReply('grok', allowed), { exitCode: 0, stdout: '', stderr: '' });
+  assert.deepEqual(hostReply('claude', { ...allowed, note: '' }), { exitCode: 0, stdout: '', stderr: '' });
+});
+
+test('performGate keeps the streak in the lock across stops, and both hooks of one stop count once', async () => {
+  const lock = { value: null };
+  let runs = 0;
+  const io = {
+    now: () => 10_000 + runs * 10_000,
+    load: async () => ({ command: 'npm test', root: '/repo', changes: null }),
+    readLock: async () => lock.value,
+    writeLock: async (record) => { lock.value = record; },
+    run: async () => { runs += 1; return { exitCode: 1, output: TURBO_FAIL(`${runs}.0s`) }; },
+  };
+  const stop = (n) => ({ hook_event_name: 'Stop', session_id: 's', last_assistant_message: `turn ${n}` });
+  assert.equal((await performGate(stop(1), io)).action, 'block');
+  // The second hook of the same stop reuses the decision and does not add to the streak.
+  assert.equal((await performGate(stop(1), { ...io, now: () => lock.value.at + 100 })).action, 'block');
+  assert.equal(lock.value.streak.count, 1);
+  assert.equal((await performGate(stop(2), io)).action, 'block');
+  const third = await performGate(stop(3), io);
+  assert.equal(third.action, 'allow');
+  assert.match(third.note, /Not holding again/);
+  assert.equal((await performGate(stop(4), io)).note, '');
+  assert.equal(runs, 4);
+});
+
+test('the hook stops holding a replayed result after two stops', async () => {
+  const dir = fixture({
+    'session-rail.json': '{"testCommand":"node fail.mjs"}\n',
+    'fail.mjs': "console.log('Failed: pkg#test');\nconsole.log(`Time: ${Math.random().toFixed(3)}s`);\nprocess.exit(1);\n",
+  });
+  try {
+    const first = await runHook(dir, { last_assistant_message: 'turn 1' }, 'claude');
+    assert.equal(first.code, 2);
+    const second = await runHook(dir, { last_assistant_message: 'turn 2' }, 'claude');
+    assert.equal(second.code, 2);
+    const third = await runHook(dir, { last_assistant_message: 'turn 3' }, 'claude');
+    assert.equal(third.code, 0);
+    assert.match(JSON.parse(third.stdout).systemMessage, /same result as the last 2 held stops/);
+    const fourth = await runHook(dir, { last_assistant_message: 'turn 4' }, 'grok');
+    assert.equal(fourth.code, 0);
+    assert.equal(fourth.stdout, '');
+    const activity = JSON.parse(readFileSync(join(dir, 'home', '.claude', 'session-rail', 'activity', 'demo.json'), 'utf8'));
+    assert.equal(activity.tests.ok, false, 'the rail still shows the failure');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

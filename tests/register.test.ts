@@ -993,6 +993,15 @@ test('a branch with a commit past the merge-base is tested', async ($, on) => {
   expect(calls.some(c => c.includes('npm test'))).toBe(true)
 })
 
+test('the same failure holds Claude twice, then lets the third stop through', async ($, on) => {
+  const { calls } = stopHarness(on)
+  const stop = (n: number) => $.classic.Stop(stopEvent({ last_assistant_message: `turn ${n}` }) as never)
+  expect((await stop(1)).preventContinuation).toBe(true)
+  expect((await stop(2)).preventContinuation).toBe(true)
+  expect(await stop(3)).toMatchObject({ continued: true })
+  expect(calls.filter(c => c.includes('npm test')).length).toBe(3)
+})
+
 test('an interrupt lets Claude stop without running tests', async ($, on) => {
   const { calls } = stopHarness(on)
   const result = await $.classic.Stop(stopEvent({ interrupted: true }) as never)

@@ -9,6 +9,7 @@ import { activityNames, mainCheckout, planWorktrees, staleActivity, ACTIVITY_GRA
 import { eventsFromRecord, keep, splitAsk } from './sessionstory.mjs';
 import { mergeReviewerAgents } from './wide.mjs';
 import { usdFromTicks } from './cost.mjs';
+import { defaultRef } from './stopgate.mjs';
 
 const HOME = homedir();
 const CLAUDE = join(HOME, '.claude');
@@ -115,12 +116,9 @@ async function branchCommits(cwd, fork, max = 8) {
   return { commits: [...mine, ...parseLog(base).map((c) => ({ ...c, fork: true }))], more: Math.max(0, (+count || 0) - mine.length) };
 }
 
-// The default branch: origin/HEAD, else the first of main/master that exists (remote, then local).
+// The default branch: origin/HEAD, else the first of main/master that exists (stopgate.mjs defaultRef).
 async function defaultBranch(cwd) {
-  const head = (await run('git', ['rev-parse', '--abbrev-ref', 'origin/HEAD'], { cwd }))?.trim();
-  for (const base of new Set([head, 'origin/main', 'origin/master', 'main', 'master'].filter(Boolean)))
-    if (await run('git', ['rev-parse', '--verify', '--quiet', base], { cwd })) return base;
-  return null;
+  return defaultRef(async (args) => (await run('git', args, { cwd }))?.trim() || null);
 }
 
 // The commit this branch forked from the default branch. On the default branch itself that's HEAD, so
