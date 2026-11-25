@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Short map for a fresh Claude or Grok session in this repo. Read this for layout, install, and how to test. Deeper hook and architecture notes are in [CLAUDE.md](CLAUDE.md). Behaviour, the product brief, and the pets are in [README.md](README.md) and [docs/pets.md](docs/pets.md). Keep the brief flow and the pets as those docs describe them.
+Short map for a fresh Claude or Grok session in this repo. Read this for layout, install, and how to test. Deeper hook and architecture notes are in [CLAUDE.md](CLAUDE.md). The overview, workflow, gates and configuration are in [README.md](README.md). Pane behaviour, keys and compaction are in [docs/reference.md](docs/reference.md), the Stop gate in [docs/stop-gate.md](docs/stop-gate.md), and the pets in [docs/pets.md](docs/pets.md). Keep the brief flow and the pets as those docs describe them.
 
 ## Layout
 
