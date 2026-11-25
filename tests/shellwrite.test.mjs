@@ -157,6 +157,24 @@ test('git pull and a fast-forward are writes, except on a branch with no brief',
   assert.deepEqual(shellWrites('git merge --ff-only feature', { onDefault: true }), [null]);
 });
 
+test('switching to a branch is a write, except on a branch with no brief', () => {
+  for (const command of ['git switch feature/x', 'git switch -c feature/x origin/main', 'git checkout main', 'git checkout -b feature/x origin/main', 'git fetch && git switch feature/x']) {
+    assert.deepEqual(writes(command), [null], command);
+    assert.equal(shellWrites(command, { onDefault: true }), null, command);
+  }
+  // A flag that throws away local changes, or an orphan branch's empty tree, stays a write on main.
+  for (const command of ['git switch -f feature/x', 'git switch --discard-changes x', 'git switch -m x', 'git switch -C x origin/main', 'git switch --orphan x', 'git checkout -f main', 'git checkout -B x origin/main', 'git checkout --orphan x', 'git checkout --theirs main']) {
+    assert.deepEqual(shellWrites(command, { onDefault: true }), [null], command);
+  }
+  // A name with `/` or `.` might be a path for checkout, so it stays one; `git switch` is the unambiguous form.
+  assert.deepEqual(shellWrites('git checkout feature/x', { onDefault: true }), ['feature/x']);
+  assert.deepEqual(shellWrites('git checkout -- src/a.ts', { onDefault: true }), ['src/a.ts']);
+  assert.deepEqual(shellWrites('git switch x && rm src/a.ts', { onDefault: true }), ['src/a.ts']);
+  // Unchanged: creating a branch at HEAD names no files anywhere.
+  assert.equal(shellWrites('git switch -c feature/x'), null);
+  assert.equal(shellWrites('git checkout -b feature/x'), null);
+});
+
 test('git worktree names the paths it writes, and the rest of its subcommands stay unknown', () => {
   assert.deepEqual(writes('git worktree add ../repo.worktrees/x -b feat/x'), ['../repo.worktrees/x']);
   assert.deepEqual(writes('git worktree add -B feat/x --reason "r s" ./inside main'), ['./inside']);

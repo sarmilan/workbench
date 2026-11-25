@@ -63,6 +63,9 @@ export function resolveWritePath(cwd, target, home) {
 // `git pull` and `git merge --ff-only` from the branch's upstream (gitSyncs) bring the checked-out branch up to date. Inside the scan they
 // are this marker (no path holds a NUL), and shellWrites decides at the top what it means.
 const GIT_SYNC = '\0git-sync';
+// `git switch <b>` and `git checkout <b>` move the checkout to a branch without naming files. On a checkout that
+// holds no brief, that is how the work gets onto its branch, so it is not a write there. Elsewhere it is.
+const GIT_SWITCH = '\0git-switch';
 
 /**
  * Paths a command would create, overwrite, move or delete.
@@ -71,7 +74,8 @@ const GIT_SYNC = '\0git-sync';
  * Device sinks are omitted. A path that starts with `~`, `$HOME` or `${HOME}` comes back as `~/…`
  * for resolveWritePath to expand.
  * `onDefault`: the checkout is on a branch that holds no brief (main, master), where syncing it with
- * `git pull` or `git merge --ff-only` is maintenance, not a write. Elsewhere they are a write.
+ * `git pull` or `git merge --ff-only` is maintenance, and switching to a branch (`git switch <b>`,
+ * `git checkout <b>`, without a force flag) is how the work leaves it. Neither is a write there. Elsewhere both are.
  * @param {string} command
  * @param {{ onDefault?: boolean }} [opts]
  * @returns {(string | null)[] | null}
@@ -81,7 +85,7 @@ export function shellWrites(command, { onDefault = false } = {}) {
   if (!found) return null;
   const kept = [];
   for (const t of found) {
-    if (t !== GIT_SYNC) kept.push(t);
+    if (t !== GIT_SYNC && t !== GIT_SWITCH) kept.push(t);
     else if (!onDefault) kept.push(null);
   }
   return kept.length ? kept : null;
@@ -565,6 +569,8 @@ function gitSub(sub, rest, depth) {
 function gitCheckout(rest) {
   let create = false;
   let force = false;
+  // An orphan branch empties the working tree.
+  let orphan = false;
   /** @type {Word[]} */
   const positionals = [];
   /** @type {Word[]} */
@@ -576,43 +582,54 @@ function gitCheckout(rest) {
     if (v === '--') { after = true; continue; }
     if (v === '-b' || v === '-B' || v === '--orphan') {
       create = true;
+      if (v !== '-b') force = true;
+      if (v === '--orphan') orphan = true;
       if (rest[i + 1] && !rest[i + 1].value.startsWith('-')) i++;
       continue;
     }
-    if (v.startsWith('--orphan=')) { create = true; continue; }
+    if (v.startsWith('--orphan=')) { create = true; force = true; orphan = true; continue; }
     if (v === '-f' || v === '--force' || v === '-m' || v === '--merge' || v === '--ours' || v === '--theirs') { force = true; continue; }
     if (v.startsWith('-')) continue;
     positionals.push(rest[i]);
   }
   if (paths.length) return literalWords(paths);
+  if (create && positionals.length === 0) return orphan ? [null] : null;
   if (force) return [null];
-  if (create && positionals.length === 0) return null;
-  if (create) return [null];
+  // `git checkout -b x origin/main` starts a branch there.
+  if (create) return positionals.length === 1 ? [GIT_SWITCH] : [null];
   if (!positionals.length) return null;
   // `git checkout README.md` is a path; `git checkout main` changes the tree and the files aren't named.
+  // A name with `/` or `.` could be either, so it stays a path: `git switch` is the unambiguous form.
   if (positionals.every((p) => p.value.includes('/') || p.value.includes('.'))) return literalWords(positionals);
-  return [null];
+  return positionals.length === 1 ? [GIT_SWITCH] : [null];
 }
 
 /** @param {Word[]} rest */
 function gitSwitch(rest) {
   let create = false;
+  let force = false;
+  let orphan = false;
   /** @type {Word[]} */
   const positionals = [];
   for (let i = 0; i < rest.length; i++) {
     const v = rest[i].value;
-    if (v === '-c' || v === '-C' || v === '--create' || v === '--force-create') {
+    if (v === '-c' || v === '-C' || v === '--create' || v === '--force-create' || v === '--orphan') {
       create = true;
+      if (v === '-C' || v === '--force-create' || v === '--orphan') force = true;
+      if (v === '--orphan') orphan = true;
       if (rest[i + 1] && !rest[i + 1].value.startsWith('-')) i++;
       continue;
     }
-    if (v.startsWith('--create=') || v.startsWith('--force-create=')) { create = true; continue; }
+    if (v.startsWith('--create=')) { create = true; continue; }
+    if (v.startsWith('--force-create=')) { create = true; force = true; continue; }
+    if (v.startsWith('--orphan=')) { create = true; force = true; orphan = true; continue; }
+    if (v === '-f' || v === '--force' || v === '--discard-changes' || v === '-m' || v === '--merge') { force = true; continue; }
     if (v.startsWith('-')) continue;
     positionals.push(rest[i]);
   }
-  if (create && positionals.length === 0) return null;
-  if (!create && positionals.length === 0) return null;
-  return [null];
+  if (positionals.length === 0) return orphan ? [null] : null;
+  // One branch, or a new branch and its start point, without a flag that throws local changes away.
+  return !force && positionals.length === 1 ? [GIT_SWITCH] : [null];
 }
 
 /** @param {Word[]} rest */

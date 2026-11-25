@@ -7,7 +7,8 @@
 //   <git common dir>/session-rail/briefs/<branch>.approved.json  { approvedAt, core } once the person approves
 // Its sections are fixed headings (## Problem, Solution, Design, Mockups, Engineering). Engineering holds
 // "### Chunk N: name" blocks, each an outline plus, once built, "Done: summary" and "Files: a, b".
-// main/master and a detached HEAD have no brief. A repo edit there is refused until the work is on a branch.
+// main/master and a detached HEAD have no brief. A repo edit there is refused until the work is on a branch,
+// except the next branch's brief (briefWriteOnMain), so the agent writes it and then switches to that branch.
 // Git's own lock files are never a code edit (isGitLock).
 
 export const BRIEF_SECTIONS = ['problem', 'solution', 'design', 'mockups', 'engineering'];
@@ -31,12 +32,28 @@ export function checkoutName(abbrev, rebaseRef) {
 
 /**
  * What to tell the agent on a checkout that cannot hold a brief. The same sentence is the prompt note
- * and the reason a repo edit is refused: branch, then the brief, then Approve in the Plan tab.
+ * and the reason a repo edit is refused: the new branch's brief first, then switch to it, then Approve.
+ * Writing the brief first means the Plan tab shows it as soon as the branch changes.
  * @param {string} branch `main`, `master`, `HEAD`, or `detached`
+ * @param {string} [common] the git common dir, to name where the brief goes
  */
-export function mainCheckoutNote(branch) {
+export function mainCheckoutNote(branch, common) {
   const name = branch === 'HEAD' || branch === 'detached' || !branch ? 'a detached HEAD' : branch;
-  return `session-rail: No brief for ${name}. Create a branch, write the brief, then Approve it in the desk's Plan tab.`;
+  const where = common ? `${common}/session-rail/briefs/<new-branch>.md (the branch name URL-encoded, / as %2F)` : 'the new branch\'s brief file';
+  return `session-rail: No brief for ${name}. Write the brief at ${where}, switch to that branch (git switch -c <new-branch>), then ask the person to Approve it in the desk's Plan tab. Code edits wait until then.`;
+}
+
+/**
+ * True when `file` is a brief, written from a checkout that cannot hold one (main, master, detached)
+ * before switching to its branch. An approval file is not: only the person approves. Nothing else
+ * under session-rail/ is either, and a path with `.` or `..` segments never is.
+ * @param {string} common the git common dir
+ * @param {string} file absolute path
+ */
+export function briefWriteOnMain(common, file) {
+  if (!common || typeof file !== 'string' || /(?:^|\/)\.\.?(?:\/|$)/.test(file)) return false;
+  const dir = `${common}/session-rail/briefs/`;
+  return file.startsWith(dir) && !file.slice(dir.length).includes('/') && file.endsWith('.md');
 }
 
 /**

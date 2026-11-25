@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import * as act from './activity.mjs';
 import { humanAsk, keep } from './sessionstory.mjs';
 import { briefInstructions, outsideRepoNote } from './brief-instructions.mjs';
-import { approvalRecord, briefFile, briefStatus, checkoutName, inWorkTree, isGitLock, mainCheckout, mainCheckoutNote, NO_BRIEF_BRANCHES, parseBrief } from './brief.mjs';
+import { approvalRecord, briefFile, briefStatus, briefWriteOnMain, checkoutName, inWorkTree, isGitLock, mainCheckout, mainCheckoutNote, NO_BRIEF_BRANCHES, parseBrief } from './brief.mjs';
 import { codeRun, gateReason as reviewWait, keptRuns, mergesPr, reportFromText, reviewsFile } from './cadence.mjs';
 import { resolveWritePath, shellWrites } from './shellwrite.mjs';
 import { findAgent, railHome } from './host.mjs';
@@ -73,7 +73,7 @@ export function readBrief(cwd) {
 }
 
 // Why an edit of `file` (absolute, or relative to the checkout) is refused, or null to let it through.
-// `checkout` is `{ branch, cwd, main }` for this checkout (cwd its toplevel, main the main checkout). On any branch, a path outside the
+// `checkout` is `{ branch, cwd, main, common }` for this checkout (cwd its toplevel, main the main checkout, common the git dir). On any branch, a path outside the
 // repo (that toplevel and the main checkout) is not a repo edit, and neither is one of git's own lock files.
 export function editReason(b, file, checkout) {
   if (isGitLock(file)) return null;
@@ -81,7 +81,8 @@ export function editReason(b, file, checkout) {
   if (checkout?.cwd && !inWorkTree([checkout.cwd, checkout.main], file)) return null;
   if (!b) {
     const branch = checkout?.branch;
-    return branch && NO_BRIEF_BRANCHES.includes(branch) ? mainCheckoutNote(branch) : null;
+    if (!branch || !NO_BRIEF_BRANCHES.includes(branch) || briefWriteOnMain(checkout.common, file)) return null;
+    return mainCheckoutNote(branch, checkout.common);
   }
   if ((file && file.startsWith(b.dir)) || b.approval?.approvedAt) return null;
   const where = `The brief for ${b.branch} is at ${b.path}. The procedure is in ${join(RAIL, 'grok-brief.md')}.`;
@@ -103,7 +104,7 @@ function canonical(p) {
 }
 
 // The checkout `editReason` compares against: its branch, its toplevel and the main checkout, as real paths.
-const checkoutOf = (head) => ({ branch: head.branch, cwd: canonical(head.root || head.cwd), main: canonical(mainCheckout(head.common)) });
+const checkoutOf = (head) => ({ branch: head.branch, cwd: canonical(head.root || head.cwd), main: canonical(mainCheckout(head.common)), common: canonical(head.common) });
 
 // A shell write uses the same reason as Edit. `null` from shellWrites is a write with no literal path,
 // treated as a file in the checkout so the person runs it themselves. The refusal is the Held banner.
@@ -251,7 +252,7 @@ export function takeProcedure(state, text) {
 function checkoutNote(cwd) {
   const head = gitHead(cwd);
   if (!head || !NO_BRIEF_BRANCHES.includes(head.branch)) return null;
-  return mainCheckoutNote(head.branch);
+  return mainCheckoutNote(head.branch, head.common);
 }
 
 // The brief procedure, on the first tool call of each turn. On main, master, or a detached HEAD the note
