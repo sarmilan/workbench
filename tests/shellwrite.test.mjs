@@ -158,7 +158,7 @@ test('git pull and a fast-forward are writes, except on a branch with no brief',
 });
 
 test('switching to a branch is a write, except on a branch with no brief', () => {
-  for (const command of ['git switch feature/x', 'git switch -c feature/x origin/main', 'git checkout main', 'git checkout -b feature/x origin/main', 'git fetch && git switch feature/x']) {
+  for (const command of ['git switch feature/x', 'git switch -c feature/x origin/main', 'git checkout -b feature/x origin/main', 'git fetch && git switch feature/x']) {
     assert.deepEqual(writes(command), [null], command);
     assert.equal(shellWrites(command, { onDefault: true }), null, command);
   }
@@ -166,7 +166,17 @@ test('switching to a branch is a write, except on a branch with no brief', () =>
   for (const command of ['git switch -f feature/x', 'git switch --discard-changes x', 'git switch -m x', 'git switch -C x origin/main', 'git switch --orphan x', 'git checkout -f main', 'git checkout -B x origin/main', 'git checkout --orphan x', 'git checkout --theirs main']) {
     assert.deepEqual(shellWrites(command, { onDefault: true }), [null], command);
   }
-  // A name with `/` or `.` might be a path for checkout, so it stays one; `git switch` is the unambiguous form.
+  // -f with a new branch at HEAD still throws local changes away, everywhere.
+  for (const command of ['git checkout -f -b x', 'git switch -f -c x', 'git switch --discard-changes -c x']) {
+    assert.deepEqual(writes(command), [null], command);
+    assert.deepEqual(shellWrites(command, { onDefault: true }), [null], command);
+  }
+  // After a cd the switch or sync may be in another checkout.
+  assert.deepEqual(shellWrites('cd ../other && git switch x', { onDefault: true }), [null]);
+  assert.deepEqual(shellWrites('cd ../other; git pull', { onDefault: true }), [null]);
+  // A bare checkout might name a file (Makefile), so it stays a write; `git switch` is the unambiguous form.
+  assert.deepEqual(shellWrites('git checkout main', { onDefault: true }), [null]);
+  assert.deepEqual(shellWrites('git checkout Makefile', { onDefault: true }), [null]);
   assert.deepEqual(shellWrites('git checkout feature/x', { onDefault: true }), ['feature/x']);
   assert.deepEqual(shellWrites('git checkout -- src/a.ts', { onDefault: true }), ['src/a.ts']);
   assert.deepEqual(shellWrites('git switch x && rm src/a.ts', { onDefault: true }), ['src/a.ts']);

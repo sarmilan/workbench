@@ -240,6 +240,14 @@ test('on main, the next branch\'s brief may be written and the branch switched t
   expect(Object.keys(files).some(f => f.endsWith('.approved.json'))).toBe(false)
 })
 
+test('on main from a symlinked cwd, a relative path to the next branch\'s brief may be written', async ($, on) => {
+  const { edits } = briefHarness(on, { branch: 'main', cwd: '/link' })
+  const c = `echo '# T' > .git/session-rail/briefs/fix%2Fy.md`
+  expect(((await $.tool.call(bash(c))) as { deny?: string }).deny).toBeUndefined()
+  expect(((await $.tool.call(bash('echo x > .git/session-rail/briefs/fix%2Fy.approved.json'))) as { deny?: string }).deny).toContain('No brief for main')
+  expect(edits).toEqual([`bash:${c}`])
+})
+
 test('on a feature branch, switching to another branch still waits for the brief', async ($, on) => {
   const { edits } = briefHarness(on)
   const r = (await $.tool.call(bash('git switch other'))) as { deny?: string }

@@ -166,6 +166,9 @@ const gate = async ($: EngineInterface, tool: string, file: string) => {
   if (!inWorkTree([head.root, head.cwd, mainCheckout(head.common)], file)) return null
   if (!b) {
     if (!NO_BRIEF_BRANCHES.includes(head.branch) || briefWriteOnMain(head.common, file)) return null
+    // A symlinked session cwd (not a subdirectory of the toplevel): a relative brief path resolves under it, not the real common dir.
+    const viaCwd = head.cwd !== head.root && !head.cwd.startsWith(`${head.root}/`) && head.common.startsWith(`${head.root}/`)
+    if (viaCwd && briefWriteOnMain(head.cwd + head.common.slice(head.root.length), file)) return null
     return refuse(mainCheckoutNote(head.branch, head.common))
   }
   return file.startsWith(b.dir) || b.approval?.approvedAt ? null : refuse(gateReason(b))
