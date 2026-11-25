@@ -1,6 +1,14 @@
 # The CI chore
 
-One bounded chore: re-check failing CI on the branch you have open. It is off until `chores` is true. Read the README section "A scheduled chore" for when to leave it off (unattended host, no budget, no checks or tests).
+One bounded chore: re-check failing CI on the branch you have open. It is not a general cron, and it is not `/loop` (that stays inside one session). It is off until `chores` is true.
+
+Turn it on with **↻ Chores** in the rail's settings (`"chores": true` in `~/.claude/session-rail/settings.json`). Then press **↻ Re-run failing CI** under Sessions, or run the commands below from the repo. `/schedule` is that same path. Each chore gets its own detached worktree in `<repo>.worktrees/chore-<id>`, so it cannot edit the checkout you have open.
+
+**Leave it off** when any of these is true:
+
+- The machine would be unattended. This includes overnight on the host Mac, a standing auto-approve, and any runner that merges while you are away. The chore does not sandbox the Mac and it does not approve anything for you.
+- You do not want a budget. There is no way to run it without a round cap.
+- There is no signal. With no checks and no tests, every round is empty and it stops after two. It will not have fixed anything.
 
 The budget is a count of rounds. It is not a dollar amount. Session cost on the rail is a separate question, and this chore does not invent one.
 

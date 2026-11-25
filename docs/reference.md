@@ -88,7 +88,7 @@ Refresh: the tree about once a minute, on switching to Git, on `r`, and on a bra
 | `Enter` | expand an agent, chapter or branch; open a prompt, reply, check, pull request or task output; jump to a session's iTerm window |
 | `Esc` | back |
 | `Tab` / `Shift-Tab`, `]` / `[` | switch tabs |
-| `r` | refresh (Git) |
+| `r` | refresh |
 | `c` | cycle the pet |
 | `q` | close the rail |
 

@@ -12,7 +12,7 @@ It is built for engineers who start from the product problem. Every branch begin
 
 ## What it is
 
-- **Panes.** The agent on the left, the **desk** (Plan, Diff, Review) in the middle, and the **rail** (Session, Git) on the right. Claude opens both on session start; `/desk` and `/rail` toggle them. The panes are read-only views over files the host and the hooks already write.
+- **Panes.** The agent on the left, the **desk** (Plan, Diff, Review) in the middle, and the **rail** (Session, Git) on the right. Claude opens both on session start, and runs your own `/start` command if you have one; `/desk` and `/rail` toggle them. The panes are read-only views over files the host and the hooks already write.
 - **Hooks.** A Claude Code plugin module and a Grok command hook that record live session activity, inject the brief procedure, and enforce three gates.
 - **Gates.** The **brief gate** blocks code edits until the person approves a brief. The **review gate** blocks `gh pr merge` until the branch's reviews are complete and clear. The **Stop gate** sends the agent back when the project's tests fail.
 - **State.** Briefs, approvals and review records live inside the repo's `.git` directory and are never committed. Session activity and settings live under `~/.claude/session-rail/`.
@@ -103,7 +103,7 @@ On a feature branch, Edit, Write and NotebookEdit are refused until the brief ha
 What is not gated:
 
 - Read-only commands, tests and commits.
-- The brief file itself. Its approval file is always refused to the agent.
+- The brief and the rest of `.git/session-rail/`. The brief's approval file is always refused to the agent.
 - **Paths outside the repo, on any branch.** "The repo" is this checkout's toplevel plus the main checkout, so a linked worktree's session cannot edit the main checkout unbriefed. Paths starting `~`, `$HOME` or `${HOME}` resolve against HOME.
 - `git worktree add|remove|move` to a path outside the repo, and `rsync` to a remote `host:path`.
 - Git's own lock files (`rm .git/index.lock`).
@@ -195,7 +195,7 @@ Per project or checkout:
 
 ## The CI chore
 
-An optional, budgeted loop that re-checks failing CI for the open branch in its own detached worktree. Budgets are counted in rounds, not dollars, and it stops after two empty rounds. It never edits the repo, approves a brief or merges. Off unless `chores` is `true`. Leave it off on an unattended machine. See [docs/chores.md](docs/chores.md).
+An optional, budgeted loop that re-checks failing CI for the open branch in its own detached worktree. Budgets are counted in rounds, not dollars, and it stops after two empty rounds. It never edits the repo, approves a brief or merges. Off unless `chores` is `true`. Leave it off on an unattended machine, or with no checks or tests to signal. See [docs/chores.md](docs/chores.md).
 
 ## Safe use
 
