@@ -143,7 +143,7 @@ test('on main, a repo edit waits for a branch and a brief', async ($, on) => {
   const { edits } = briefHarness(on, { branch: 'main' })
   const r = (await $.tool.call(edit('/repo/src/a.ts'))) as { deny?: string }
   expect(r.deny).toContain('No brief for main')
-  expect(r.deny).toContain('Create a branch')
+  expect(r.deny).toContain('switch to that branch')
   expect(r.deny).toContain('brief')
   expect(edits).toEqual([])
 })
@@ -204,7 +204,7 @@ test('on main, a shell write in the repo waits for a branch, and one outside doe
   const { edits } = briefHarness(on, { branch: 'main' })
   const r = (await $.tool.call(bash('echo hi > src/a.ts'))) as { deny?: string }
   expect(r.deny).toContain('No brief for main')
-  expect(r.deny).toContain('Create a branch')
+  expect(r.deny).toContain('switch to that branch')
   await $.tool.call(bash('echo hi > /tmp/plan.md'))
   await $.tool.call(bash('git log'))
   expect(edits).toEqual(['bash:echo hi > /tmp/plan.md', 'bash:git log'])
@@ -220,6 +220,39 @@ test('on main, syncing the branch and clearing a git lock are not refused', asyn
   expect(mixed.deny).toContain('No brief for main')
   const merge = (await $.tool.call(bash('git merge feature'))) as { deny?: string }
   expect(merge.deny).toContain('No brief for main')
+})
+
+test('on main, the next branch\'s brief may be written and the branch switched to, but not approved', async ($, on) => {
+  const { edits, files } = briefHarness(on, { branch: 'main' })
+  const brief = '/repo/.git/session-rail/briefs/fix%2Fy.md'
+  expect(((await $.tool.call(edit(brief))) as { deny?: string }).deny).toBeUndefined()
+  for (const c of ['git switch -c fix/y', 'git switch fix/y', `cat > ${brief} <<'EOF'\n# T\nEOF`]) {
+    expect(((await $.tool.call(bash(c))) as { deny?: string }).deny).toBeUndefined()
+  }
+  expect(edits).toEqual([brief, 'bash:git switch -c fix/y', 'bash:git switch fix/y', `bash:cat > ${brief} <<'EOF'\n# T\nEOF`])
+  for (const f of ['/repo/.git/session-rail/briefs/fix%2Fy.approved.json', '/repo/.git/session-rail/reviews/fix%2Fy.json', '/repo/.git/session-rail/briefs/../x.md']) {
+    const r = (await $.tool.call(edit(f))) as { deny?: string }
+    expect(r.deny).toContain('No brief for main')
+  }
+  const forced = (await $.tool.call(bash('git switch -f fix/y'))) as { deny?: string }
+  expect(forced.deny).toContain('No brief for main')
+  expect(forced.deny).toContain('/repo/.git/session-rail/briefs/')
+  expect(Object.keys(files).some(f => f.endsWith('.approved.json'))).toBe(false)
+})
+
+test('on main from a symlinked cwd, a relative path to the next branch\'s brief may be written', async ($, on) => {
+  const { edits } = briefHarness(on, { branch: 'main', cwd: '/link' })
+  const c = `echo '# T' > .git/session-rail/briefs/fix%2Fy.md`
+  expect(((await $.tool.call(bash(c))) as { deny?: string }).deny).toBeUndefined()
+  expect(((await $.tool.call(bash('echo x > .git/session-rail/briefs/fix%2Fy.approved.json'))) as { deny?: string }).deny).toContain('No brief for main')
+  expect(edits).toEqual([`bash:${c}`])
+})
+
+test('on a feature branch, switching to another branch still waits for the brief', async ($, on) => {
+  const { edits } = briefHarness(on)
+  const r = (await $.tool.call(bash('git switch other'))) as { deny?: string }
+  expect(r.deny).toContain('wait for the session brief')
+  expect(edits).toEqual([])
 })
 
 test('on main, a write under HOME outside the repo is not refused', async ($, on) => {

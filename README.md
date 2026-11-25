@@ -108,7 +108,7 @@ What is not gated:
 - `git worktree add|remove|move` to a path outside the repo, and `rsync` to a remote `host:path`.
 - Git's own lock files (`rm .git/index.lock`).
 
-On `main`, `master` or a detached HEAD there is no brief: a repo edit is refused with an instruction to create a branch. `git pull` and `git merge --ff-only` from upstream still run there. A refusal shows on the rail as `Held` and puts a `?` over the pet.
+On `main`, `master` or a detached HEAD there is no brief, and a repo edit is refused. The agent writes the next branch's brief (`.git/session-rail/briefs/<branch>.md`; nothing else under `.git/session-rail/`), switches to that branch with `git switch <b>`, `git switch -c <b>` or `git checkout -b <b>`, and the brief shows on the Plan tab for Approve. A forced, merge or orphan switch is still a write, and so is a bare `git checkout <name>`, which may name a file. `git pull` and `git merge --ff-only` from upstream also run there. A refusal shows on the rail as `Held` and puts a `?` over the pet.
 
 ### Review gate
 

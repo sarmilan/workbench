@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -87,6 +87,12 @@ test('on main a repo edit is refused and names the branch and the brief', () => 
   assert.match(editReason(null, '/repo/a.js', { branch: 'master', cwd: '/repo' }), /No brief for master/);
   assert.match(editReason(null, '/repo/a.js', { branch: 'HEAD', cwd: '/repo' }), /detached HEAD/);
   assert.match(mainCheckoutNote('detached'), /detached HEAD/);
+  const withDir = { branch: 'main', cwd: '/repo', main: '/repo', common: '/repo/.git' };
+  assert.equal(editReason(null, '/repo/.git/session-rail/briefs/fix%2Fy.md', withDir), null);
+  assert.match(editReason(null, '/repo/.git/session-rail/briefs/fix%2Fy.approved.json', withDir), /No brief for main/);
+  assert.match(editReason(null, '/repo/.git/session-rail/reviews/fix%2Fy.json', withDir), /No brief for main/);
+  assert.match(editReason(null, '/repo/.git/session-rail/briefs/../x.md', withDir), /No brief for main/);
+  assert.match(editReason(null, '/repo/bin/rail.mjs', withDir), /\/repo\/\.git\/session-rail\/briefs\/<new-branch>\.md/);
   assert.match(editReason(brief, '/repo/a.js'), /wait for the session brief/);
   assert.equal(editReason({ ...brief, approval: { approvedAt: 1 } }, '/repo/a.js'), null);
 });
@@ -132,7 +138,16 @@ test('on main Grok may sync the branch, clear a git lock, and write under HOME',
     assert.equal(shellEdit(dir, 'git worktree add ../grok-wt-x -b feat/x'), null);
     assert.equal(shellEdit(dir, 'rsync -a prompt.md devbox:~/prompt.md'), null);
     assert.match(shellEdit(dir, 'git worktree add ./inside').reason, /No brief for main/);
+    // The next branch's brief and the switch to it go through; its approval and other rail files do not.
+    const briefs = join(realpathSync(dir), '.git/session-rail/briefs');
+    assert.equal(shellEdit(dir, `echo '# T' > ${briefs}/feature%2Fx.md`), null);
+    assert.equal(shellEdit(dir, 'git switch -c feature/x origin/main'), null);
+    assert.equal(shellEdit(dir, 'git switch feature/x'), null);
+    assert.match(shellEdit(dir, `echo '{}' > ${briefs}/feature%2Fx.approved.json`).reason, /No brief for main/);
+    assert.match(shellEdit(dir, `echo '{}' > ${briefs}/../reviews/x.json`).reason, /No brief for main/);
+    assert.match(shellEdit(dir, 'git switch -f feature/x').reason, /switch to that branch/);
     execFileSync('git', ['switch', '-q', '-c', 'feature/x'], { cwd: dir });
+    assert.match(shellEdit(dir, 'git switch main').reason, /wait for the session brief/);
     assert.match(shellEdit(dir, 'git pull --ff-only').reason, /wait for the session brief/);
   } finally {
     if (previous == null) delete process.env.HOME;

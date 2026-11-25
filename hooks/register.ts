@@ -1,5 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { approvalRecord, briefFile, briefStatus, checkoutName, inWorkTree, isGitLock, mainCheckout, mainCheckoutNote, NO_BRIEF_BRANCHES, parseBrief } from '../bin/brief.mjs'
+import { approvalRecord, briefFile, briefStatus, briefWriteOnMain, checkoutName, inWorkTree, isGitLock, mainCheckout, mainCheckoutNote, NO_BRIEF_BRANCHES, parseBrief } from '../bin/brief.mjs'
 import { outsideRepoNote } from '../bin/brief-instructions.mjs'
 import * as act from './activity.ts'
 import { goAhead } from './goahead.ts'
@@ -150,7 +150,8 @@ const gateReason = (b: Brief) => {
 // Why an edit of `file` is refused, or null to let it through. The brief itself (anything under
 // .git/session-rail/) can always be written, except its approval file, and so can git's own lock files.
 // On any branch, a path outside the repo (this checkout and the main checkout) is not a code edit. Inside
-// it, a checkout with no brief (main, master, detached) refuses the edit, and a branch waits for its brief.
+// it, a checkout with no brief (main, master, detached) refuses the edit except the next branch's brief, and a
+// branch waits for its brief.
 const gate = async ($: EngineInterface, tool: string, file: string) => {
   if (isGitLock(file)) return null
   const head = await gitHead($)
@@ -163,7 +164,13 @@ const gate = async ($: EngineInterface, tool: string, file: string) => {
   if (b && file === b.approvedPath) return refuse('session-rail: only the person approves the brief, in the desk, with /approve-brief, or with a message that is exactly approved.')
   // head.cwd too: the session cwd may be a symlinked path to the checkout, and relative shell writes resolve against it.
   if (!inWorkTree([head.root, head.cwd, mainCheckout(head.common)], file)) return null
-  if (!b) return NO_BRIEF_BRANCHES.includes(head.branch) ? refuse(mainCheckoutNote(head.branch)) : null
+  if (!b) {
+    if (!NO_BRIEF_BRANCHES.includes(head.branch) || briefWriteOnMain(head.common, file)) return null
+    // A symlinked session cwd (not a subdirectory of the toplevel): a relative brief path resolves under it, not the real common dir.
+    const viaCwd = head.cwd !== head.root && !head.cwd.startsWith(`${head.root}/`) && head.common.startsWith(`${head.root}/`)
+    if (viaCwd && briefWriteOnMain(head.cwd + head.common.slice(head.root.length), file)) return null
+    return refuse(mainCheckoutNote(head.branch, head.common))
+  }
   return file.startsWith(b.dir) || b.approval?.approvedAt ? null : refuse(gateReason(b))
 }
 
@@ -603,7 +610,7 @@ export const register: Register = on => {
       return { sections: [...composed.sections, { id: 'session-rail-brief', text: outsideRepoNote(folder), scope: 'session' as const }] }
     }
     if (!NO_BRIEF_BRANCHES.includes(head.branch)) return composed
-    return { sections: [...composed.sections, { id: 'session-rail-brief', text: mainCheckoutNote(head.branch), scope: 'session' as const }] }
+    return { sections: [...composed.sections, { id: 'session-rail-brief', text: mainCheckoutNote(head.branch, head.common), scope: 'session' as const }] }
   })
 
   // Every new subagent gets a name and colour (bin/names.mjs), and its task reads "Name: description", which is
