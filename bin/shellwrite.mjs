@@ -163,7 +163,7 @@ function commandWrites(argv, depth) {
   if (cmd === 'curl') return curlWrites(args);
   if (cmd === 'wget') return wgetWrites(args);
   if (cmd === 'patch') return args.some((a) => a.value === '--dry-run' || a.value === '--check') ? null : [null];
-  if (cmd === 'rsync') return args.some((a) => a.value === '-n' || a.value === '--dry-run') ? null : flagPaths(args);
+  if (cmd === 'rsync') return rsyncWrites(args);
   if (cmd === 'tar') return tarWrites(args);
   if (cmd === 'unzip') return args.some((a) => a.value === '-l' || a.value === '-t' || a.value === '-p' || a.value === '--list') ? null : [null];
   if (COMPRESS.has(cmd)) return compressWrites(args);
@@ -226,6 +226,48 @@ function findWrites(args, depth) {
   }
   return null;
 }
+
+/**
+ * rsync writes its destination (the last operand), not its sources, unless --remove-source-files deletes
+ * them. A remote destination (`host:path`, `user@host:path`, `rsync://…`) is not a local write.
+ * @param {Word[]} args
+ */
+function rsyncWrites(args) {
+  if (args.some((a) => a.value === '-n' || a.value === '--dry-run')) return null;
+  /** @type {(string | null)[]} */
+  const out = [];
+  /** @type {Word[]} */
+  const rest = [];
+  for (let i = 0; i < args.length; i++) {
+    const v = args[i].value;
+    if (v === '--') { rest.push(...args.slice(i)); break; }
+    const eq = v.indexOf('=');
+    const name = v.startsWith('--') && eq > 0 ? v.slice(0, eq) : v;
+    if (RSYNC_WRITE_OPTS.has(name)) {
+      const w = eq > 0 && v.startsWith('--') ? (args[i].expandable ? null : v.slice(eq + 1)) : args[++i] ? (args[i].expandable ? null : args[i].value) : undefined;
+      if (w !== undefined && w !== '') out.push(w);
+      continue;
+    }
+    if (RSYNC_VALUE_OPTS.has(v)) { i++; continue; }
+    rest.push(args[i]);
+  }
+  const operands = flagPaths(rest);
+  // One operand lists it; nothing is written.
+  if (operands && operands.length > 1) {
+    const dest = operands[operands.length - 1];
+    if (args.some((a) => a.value === '--remove-source-files')) out.push(...operands.slice(0, -1).filter((p) => p == null || !isRemote(p)));
+    if (dest == null || !isRemote(dest)) out.push(dest);
+  }
+  return out.length ? out : null;
+}
+
+/** rsync options whose separate value is a local file or folder it writes. */
+const RSYNC_WRITE_OPTS = new Set(['--log-file', '--backup-dir', '--partial-dir', '--temp-dir', '-T', '--write-batch', '--only-write-batch']);
+/** rsync options that take a separate value that is not a path it writes. */
+const RSYNC_VALUE_OPTS = new Set(['-e', '--rsh', '-f', '--filter', '--exclude', '--include', '--exclude-from', '--include-from', '--files-from', '--compare-dest', '--copy-dest', '--link-dest', '--chmod', '--chown', '--rsync-path', '--password-file', '--port', '--bwlimit', '--timeout', '--contimeout', '--max-size', '--min-size', '--max-delete', '--suffix', '-B', '--block-size', '--modify-window', '--out-format', '--log-file-format', '--read-batch', '--sockopts', '--usermap', '--groupmap', '--iconv', '--checksum-choice', '--compress-choice', '--compress-level', '--skip-compress', '-M', '--remote-option', '--address', '--protocol', '--info', '--debug', '--stop-after', '--stop-at', '--max-alloc']);
+
+/** `host:path`, `user@host:path`, `host::module` or `rsync://…`: a colon before any slash. */
+const isRemote = (p) => /^rsync:\/\//.test(p) || /^[^/]*:/.test(p);
 
 /** Non-option operands, as literals or `null` when the word expands. Empty words are dropped. `null` result means no path. */
 function flagPaths(args) {
@@ -630,9 +672,20 @@ function gitConfig(rest) {
 
 /** @param {Word[]} rest */
 function gitWorktree(rest) {
-  const sub = rest.find((a) => !a.value.startsWith('-'))?.value;
+  const at = rest.findIndex((a) => !a.value.startsWith('-'));
+  const sub = at < 0 ? '' : rest[at].value;
   if (!sub || sub === 'list') return null;
-  return [null];
+  const want = sub === 'add' || sub === 'remove' ? 1 : sub === 'move' ? 2 : 0;
+  if (!want) return [null];
+  // add's -b/-B/--reason take a value; the rest of its flags, and remove's -f, do not.
+  const paths = [];
+  for (let i = at + 1; i < rest.length && paths.length < want; i++) {
+    const v = rest[i].value;
+    if (v === '-b' || v === '-B' || v === '--reason') { i++; continue; }
+    if (v.startsWith('-')) continue;
+    paths.push(rest[i].expandable ? null : v);
+  }
+  return paths.length === want ? paths : [null];
 }
 
 /** @param {Word[]} rest @param {number} depth */

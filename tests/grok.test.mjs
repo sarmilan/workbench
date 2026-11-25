@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { callFinished, callStarted, fresh, heard, noteReply, replied, trackTasks, turnEnded, turnStarted } from '../bin/activity.mjs';
 import { attentionFor } from '../bin/mascot.mjs';
-import { approvalRecord, briefFile, checkoutName, inWorkTree, isGitLock, mainCheckoutNote, parseBrief } from '../bin/brief.mjs';
+import { approvalRecord, briefFile, checkoutName, inWorkTree, isGitLock, mainCheckout, mainCheckoutNote, parseBrief } from '../bin/brief.mjs';
 import { armTurn, chatApproval, editReason, handle, panelMessage, procedure, readBrief, schedulePublish, shellEdit, slashCommand, takeProcedure } from '../bin/grok-hook.mjs';
 import { briefInstructions, deskOutsideNote, outsideRepoNote } from '../bin/brief-instructions.mjs';
 import { C, fg, paneBgOff, paneBgOn, usePalette } from '../bin/term.mjs';
@@ -91,6 +91,21 @@ test('on main a repo edit is refused and names the branch and the brief', () => 
   assert.equal(editReason({ ...brief, approval: { approvedAt: 1 } }, '/repo/a.js'), null);
 });
 
+test('on any branch a path outside the repo is not a repo edit', () => {
+  const feature = { branch: 'feature/x', cwd: '/repo', main: '/repo' };
+  assert.equal(editReason(brief, '/tmp/scratchpad/draft.md', feature), null);
+  assert.match(editReason(brief, '/repo/a.js', feature), /wait for the session brief/);
+  assert.match(editReason(brief, brief.approvedPath, feature), /only the person approves/);
+  const linked = { branch: 'feature/x', cwd: '/repo.worktrees/x', main: '/repo' };
+  assert.match(editReason(brief, '/repo.worktrees/x/a.js', linked), /wait for the session brief/);
+  assert.match(editReason(brief, '/repo/a.js', linked), /wait for the session brief/);
+  assert.equal(editReason(brief, '/tmp/plan.md', linked), null);
+  assert.equal(inWorkTree(['/wt', '/repo'], '/repo/a.js'), true);
+  assert.equal(inWorkTree(['/wt', ''], '/tmp/a.js'), false);
+  assert.equal(mainCheckout('/repo/.git'), '/repo');
+  assert.equal(mainCheckout('/srv/repo.git'), '');
+});
+
 test('on main Grok may sync the branch, clear a git lock, and write under HOME', () => {
   const dir = mkdtempSync(join(tmpdir(), 'grok-main-'));
   const home = mkdtempSync(join(tmpdir(), 'grok-home-'));
@@ -114,6 +129,9 @@ test('on main Grok may sync the branch, clear a git lock, and write under HOME',
     assert.equal(shellEdit(dir, 'jq . x > "$HOME/.claude-work/settings.json"'), null);
     assert.match(shellEdit(dir, 'git pull && rm src/a.ts').reason, /No brief for main/);
     assert.match(shellEdit(dir, 'echo hi > src/a.ts').reason, /No brief for main/);
+    assert.equal(shellEdit(dir, 'git worktree add ../grok-wt-x -b feat/x'), null);
+    assert.equal(shellEdit(dir, 'rsync -a prompt.md devbox:~/prompt.md'), null);
+    assert.match(shellEdit(dir, 'git worktree add ./inside').reason, /No brief for main/);
     execFileSync('git', ['switch', '-q', '-c', 'feature/x'], { cwd: dir });
     assert.match(shellEdit(dir, 'git pull --ff-only').reason, /wait for the session brief/);
   } finally {

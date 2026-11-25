@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import * as act from './activity.mjs';
 import { humanAsk, keep } from './sessionstory.mjs';
 import { briefInstructions, outsideRepoNote } from './brief-instructions.mjs';
-import { approvalRecord, briefFile, briefStatus, checkoutName, inWorkTree, isGitLock, mainCheckoutNote, NO_BRIEF_BRANCHES, parseBrief } from './brief.mjs';
+import { approvalRecord, briefFile, briefStatus, checkoutName, inWorkTree, isGitLock, mainCheckout, mainCheckoutNote, NO_BRIEF_BRANCHES, parseBrief } from './brief.mjs';
 import { codeRun, gateReason as reviewWait, keptRuns, mergesPr, reportFromText, reviewsFile } from './cadence.mjs';
 import { resolveWritePath, shellWrites } from './shellwrite.mjs';
 import { findAgent, railHome } from './host.mjs';
@@ -73,17 +73,16 @@ export function readBrief(cwd) {
 }
 
 // Why an edit of `file` (absolute, or relative to the checkout) is refused, or null to let it through.
-// `checkout` is `{ branch, cwd }` when this checkout cannot hold a brief. A path outside `cwd` is not a repo edit,
-// and neither is one of git's own lock files.
+// `checkout` is `{ branch, cwd, main }` for this checkout (cwd its toplevel, main the main checkout). On any branch, a path outside the
+// repo (that toplevel and the main checkout) is not a repo edit, and neither is one of git's own lock files.
 export function editReason(b, file, checkout) {
   if (isGitLock(file)) return null;
+  if (b && file === b.approvedPath) return 'session-rail: only the person approves the brief, in the desk, with /approve-brief, or with a message that is exactly approved.';
+  if (checkout?.cwd && !inWorkTree([checkout.cwd, checkout.main], file)) return null;
   if (!b) {
     const branch = checkout?.branch;
-    if (!branch || !NO_BRIEF_BRANCHES.includes(branch)) return null;
-    if (checkout.cwd && !inWorkTree(checkout.cwd, file)) return null;
-    return mainCheckoutNote(branch);
+    return branch && NO_BRIEF_BRANCHES.includes(branch) ? mainCheckoutNote(branch) : null;
   }
-  if (file === b.approvedPath) return 'session-rail: only the person approves the brief, in the desk, with /approve-brief, or with a message that is exactly approved.';
   if ((file && file.startsWith(b.dir)) || b.approval?.approvedAt) return null;
   const where = `The brief for ${b.branch} is at ${b.path}. The procedure is in ${join(RAIL, 'grok-brief.md')}.`;
   if (b.text === null) return `session-rail: code edits wait for the session brief. Write it first. ${where}`;
@@ -103,6 +102,9 @@ function canonical(p) {
   return p;
 }
 
+// The checkout `editReason` compares against: its branch, its toplevel and the main checkout, as real paths.
+const checkoutOf = (head) => ({ branch: head.branch, cwd: canonical(head.root || head.cwd), main: canonical(mainCheckout(head.common)) });
+
 // A shell write uses the same reason as Edit. `null` from shellWrites is a write with no literal path,
 // treated as a file in the checkout so the person runs it themselves. The refusal is the Held banner.
 // On main or master, `git pull` and `git merge --ff-only` sync the branch and aren't writes. `~/…` resolves against HOME.
@@ -114,7 +116,7 @@ export function shellEdit(cwd, command) {
   const targets = shellWrites(command, { onDefault });
   if (!targets) return null;
   const root = canonical(head?.root || head?.cwd || cwd);
-  const checkout = !b && onDefault ? { branch: head.branch, cwd: root } : null;
+  const checkout = head ? checkoutOf(head) : null;
   for (const target of targets) {
     const file = target == null ? `${root}/shell-write` : canonical(resolveWritePath(head?.cwd || cwd, target, process.env.HOME || ''));
     if (!file) continue;
@@ -403,8 +405,8 @@ export function handle(event, agent, io) {
     if (raw) {
       const file = canonical(resolve(cwd, raw));
       const b = readBrief(cwd);
-      const head = b ? null : gitHead(cwd);
-      const checkout = head && NO_BRIEF_BRANCHES.includes(head.branch) ? { branch: head.branch, cwd: canonical(head.root || head.cwd) } : null;
+      const head = gitHead(cwd);
+      const checkout = head ? checkoutOf(head) : null;
       const reason = editReason(b, file, checkout);
       if (reason) {
         if (b) writeProcedure(b); // the deny drops any attached procedure, so the reason points at the file

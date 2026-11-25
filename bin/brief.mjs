@@ -40,15 +40,25 @@ export function mainCheckoutNote(branch) {
 }
 
 /**
- * True when `file` is in this repo: a relative path, or an absolute path inside `root`.
- * Callers pass the git toplevel (the session cwd when that lookup fails). A path outside is not a repo edit.
+ * True when `file` is in this repo: a relative path, or an absolute path inside one of `roots`.
+ * Callers pass the git toplevel (the session cwd when that lookup fails) and the main checkout
+ * (`mainCheckout`), so a linked worktree's session still counts the main checkout as the repo.
+ * A path outside them all is not a repo edit.
+ * @param {string | string[]} roots
+ * @param {string} file
  */
-export function inWorkTree(root, file) {
-  if (!root || !file) return false;
+export function inWorkTree(roots, file) {
+  const list = (Array.isArray(roots) ? roots : [roots]).filter(Boolean);
+  if (!list.length || !file) return false;
   if (!file.startsWith('/')) return true;
-  const base = root.endsWith('/') ? root.slice(0, -1) : root;
-  return file === base || file.startsWith(`${base}/`);
+  return list.some((root) => {
+    const base = root.endsWith('/') ? root.slice(0, -1) : root;
+    return file === base || file.startsWith(`${base}/`);
+  });
 }
+
+/** The main checkout's folder from the git common dir (`/repo/.git` → `/repo`), or '' for a bare or moved git dir. */
+export const mainCheckout = (common) => (typeof common === 'string' && common.endsWith('/.git') ? common.slice(0, -5) : '');
 
 /**
  * True for git's own lock files (`.git/index.lock`, `.git/refs/heads/main.lock`, a worktree's

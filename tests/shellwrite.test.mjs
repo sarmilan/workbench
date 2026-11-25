@@ -156,3 +156,29 @@ test('git pull and a fast-forward are writes, except on a branch with no brief',
   assert.deepEqual(shellWrites('git pull origin feature', { onDefault: true }), [null]);
   assert.deepEqual(shellWrites('git merge --ff-only feature', { onDefault: true }), [null]);
 });
+
+test('git worktree names the paths it writes, and the rest of its subcommands stay unknown', () => {
+  assert.deepEqual(writes('git worktree add ../repo.worktrees/x -b feat/x'), ['../repo.worktrees/x']);
+  assert.deepEqual(writes('git worktree add -B feat/x --reason "r s" ./inside main'), ['./inside']);
+  assert.deepEqual(writes('git worktree remove -f ../wt'), ['../wt']);
+  assert.deepEqual(writes('git worktree move ../a ../b'), ['../a', '../b']);
+  assert.deepEqual(writes('git worktree add $DIR'), [null]);
+  assert.deepEqual(writes('git worktree prune'), [null]);
+  assert.equal(writes('git worktree list'), null);
+});
+
+test('rsync writes only a local destination', () => {
+  assert.equal(writes('rsync -a ./p devbox:~/p'), null);
+  assert.equal(writes('rsync -a -e "ssh -p 22" p.md user@devbox:/home/u/'), null);
+  assert.equal(writes('rsync -a ./p rsync://host/module/'), null);
+  assert.deepEqual(writes('rsync -a devbox:~/out ./out'), ['./out']);
+  assert.deepEqual(writes('rsync -a ./a ./b'), ['./b']);
+  assert.deepEqual(writes('rsync -a --remove-source-files ./a devbox:~/x'), ['./a']);
+  assert.deepEqual(writes('rsync -a ./a $DEST'), [null]);
+  assert.equal(writes('rsync -n ./a ./b'), null);
+  assert.equal(writes('rsync devbox:~/dir/'), null);
+  assert.deepEqual(writes('rsync -a ./a ./repo-file --log-file /tmp/log'), ['/tmp/log', './repo-file']);
+  assert.deepEqual(writes('rsync -a --exclude node_modules ./a /tmp/out'), ['/tmp/out']);
+  assert.deepEqual(writes('rsync -a --backup-dir=./bak ./a devbox:x'), ['./bak']);
+  assert.equal(writes('rsync -a -e "ssh -p 22" --remove-source-files devbox:a devbox:b'), null);
+});
