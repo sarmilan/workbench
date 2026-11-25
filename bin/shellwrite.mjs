@@ -234,13 +234,37 @@ function findWrites(args, depth) {
  */
 function rsyncWrites(args) {
   if (args.some((a) => a.value === '-n' || a.value === '--dry-run')) return null;
-  const operands = flagPaths(args);
-  if (!operands) return null;
-  const dest = operands[operands.length - 1];
-  const out = args.some((a) => a.value === '--remove-source-files') ? operands.slice(0, -1).filter((p) => p == null || !isRemote(p)) : [];
-  if (dest == null || !isRemote(dest)) out.push(dest);
+  /** @type {(string | null)[]} */
+  const out = [];
+  /** @type {Word[]} */
+  const rest = [];
+  for (let i = 0; i < args.length; i++) {
+    const v = args[i].value;
+    if (v === '--') { rest.push(...args.slice(i)); break; }
+    const eq = v.indexOf('=');
+    const name = v.startsWith('--') && eq > 0 ? v.slice(0, eq) : v;
+    if (RSYNC_WRITE_OPTS.has(name)) {
+      const w = eq > 0 && v.startsWith('--') ? (args[i].expandable ? null : v.slice(eq + 1)) : args[++i] ? (args[i].expandable ? null : args[i].value) : undefined;
+      if (w !== undefined && w !== '') out.push(w);
+      continue;
+    }
+    if (RSYNC_VALUE_OPTS.has(v)) { i++; continue; }
+    rest.push(args[i]);
+  }
+  const operands = flagPaths(rest);
+  // One operand lists it; nothing is written.
+  if (operands && operands.length > 1) {
+    const dest = operands[operands.length - 1];
+    if (args.some((a) => a.value === '--remove-source-files')) out.push(...operands.slice(0, -1).filter((p) => p == null || !isRemote(p)));
+    if (dest == null || !isRemote(dest)) out.push(dest);
+  }
   return out.length ? out : null;
 }
+
+/** rsync options whose separate value is a local file or folder it writes. */
+const RSYNC_WRITE_OPTS = new Set(['--log-file', '--backup-dir', '--partial-dir', '--temp-dir', '-T', '--write-batch', '--only-write-batch']);
+/** rsync options that take a separate value that is not a path it writes. */
+const RSYNC_VALUE_OPTS = new Set(['-e', '--rsh', '-f', '--filter', '--exclude', '--include', '--exclude-from', '--include-from', '--files-from', '--compare-dest', '--copy-dest', '--link-dest', '--chmod', '--chown', '--rsync-path', '--password-file', '--port', '--bwlimit', '--timeout', '--contimeout', '--max-size', '--min-size', '--max-delete', '--suffix', '-B', '--block-size', '--modify-window', '--out-format', '--log-file-format', '--read-batch', '--sockopts', '--usermap', '--groupmap', '--iconv', '--checksum-choice', '--compress-choice', '--compress-level', '--skip-compress', '-M', '--remote-option', '--address', '--protocol', '--info', '--debug', '--stop-after', '--stop-at', '--max-alloc']);
 
 /** `host:path`, `user@host:path`, `host::module` or `rsync://…`: a colon before any slash. */
 const isRemote = (p) => /^rsync:\/\//.test(p) || /^[^/]*:/.test(p);

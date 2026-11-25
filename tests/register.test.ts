@@ -255,6 +255,12 @@ test('in a linked worktree, both the worktree and the main checkout wait for the
   expect(edits).toEqual(['/tmp/plan.md'])
 })
 
+test('a symlinked session cwd still counts as the repo', async ($, on) => {
+  briefHarness(on, { cwd: '/link/repo', top: '/repo' })
+  expect(((await $.tool.call(edit('/link/repo/src/a.ts'))) as { deny?: string }).deny).toContain('wait for the session brief')
+  expect(((await $.tool.call(bash('echo hi > src/a.ts'))) as { deny?: string }).deny).toContain('wait for the session brief')
+})
+
 test('on main, a worktree outside the repo and a copy to the devbox are not refused', async ($, on) => {
   const { edits } = briefHarness(on, { branch: 'main' })
   const cmds = ['git worktree add ../repo.worktrees/x -b feat/x', 'rsync -a prompt.md devbox:~/prompt.md']

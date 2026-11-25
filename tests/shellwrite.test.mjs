@@ -176,4 +176,9 @@ test('rsync writes only a local destination', () => {
   assert.deepEqual(writes('rsync -a --remove-source-files ./a devbox:~/x'), ['./a']);
   assert.deepEqual(writes('rsync -a ./a $DEST'), [null]);
   assert.equal(writes('rsync -n ./a ./b'), null);
+  assert.equal(writes('rsync devbox:~/dir/'), null);
+  assert.deepEqual(writes('rsync -a ./a ./repo-file --log-file /tmp/log'), ['/tmp/log', './repo-file']);
+  assert.deepEqual(writes('rsync -a --exclude node_modules ./a /tmp/out'), ['/tmp/out']);
+  assert.deepEqual(writes('rsync -a --backup-dir=./bak ./a devbox:x'), ['./bak']);
+  assert.equal(writes('rsync -a -e "ssh -p 22" --remove-source-files devbox:a devbox:b'), null);
 });

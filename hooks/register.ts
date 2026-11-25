@@ -161,7 +161,8 @@ const gate = async ($: EngineInterface, tool: string, file: string) => {
     return reason
   }
   if (b && file === b.approvedPath) return refuse('session-rail: only the person approves the brief, in the desk, with /approve-brief, or with a message that is exactly approved.')
-  if (!inWorkTree([head.root || head.cwd, mainCheckout(head.common)], file)) return null
+  // head.cwd too: the session cwd may be a symlinked path to the checkout, and relative shell writes resolve against it.
+  if (!inWorkTree([head.root, head.cwd, mainCheckout(head.common)], file)) return null
   if (!b) return NO_BRIEF_BRANCHES.includes(head.branch) ? refuse(mainCheckoutNote(head.branch)) : null
   return file.startsWith(b.dir) || b.approval?.approvedAt ? null : refuse(gateReason(b))
 }
