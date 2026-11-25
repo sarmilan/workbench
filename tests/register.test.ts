@@ -255,6 +255,15 @@ test('in a linked worktree, both the worktree and the main checkout wait for the
   expect(edits).toEqual(['/tmp/plan.md'])
 })
 
+test('on main, a worktree outside the repo and a copy to the devbox are not refused', async ($, on) => {
+  const { edits } = briefHarness(on, { branch: 'main' })
+  const cmds = ['git worktree add ../repo.worktrees/x -b feat/x', 'rsync -a prompt.md devbox:~/prompt.md']
+  for (const c of cmds) expect(((await $.tool.call(bash(c))) as { deny?: string }).deny).toBeUndefined()
+  expect(edits).toEqual(cmds.map(c => `bash:${c}`))
+  const inside = (await $.tool.call(bash('git worktree add ./inside'))) as { deny?: string }
+  expect(inside.deny).toContain('No brief for main')
+})
+
 test('on a feature branch, git pull still waits for the brief', async ($, on) => {
   const { edits } = briefHarness(on)
   const r = (await $.tool.call(bash('git pull --ff-only'))) as { deny?: string }

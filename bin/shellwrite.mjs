@@ -163,7 +163,7 @@ function commandWrites(argv, depth) {
   if (cmd === 'curl') return curlWrites(args);
   if (cmd === 'wget') return wgetWrites(args);
   if (cmd === 'patch') return args.some((a) => a.value === '--dry-run' || a.value === '--check') ? null : [null];
-  if (cmd === 'rsync') return args.some((a) => a.value === '-n' || a.value === '--dry-run') ? null : flagPaths(args);
+  if (cmd === 'rsync') return rsyncWrites(args);
   if (cmd === 'tar') return tarWrites(args);
   if (cmd === 'unzip') return args.some((a) => a.value === '-l' || a.value === '-t' || a.value === '-p' || a.value === '--list') ? null : [null];
   if (COMPRESS.has(cmd)) return compressWrites(args);
@@ -226,6 +226,24 @@ function findWrites(args, depth) {
   }
   return null;
 }
+
+/**
+ * rsync writes its destination (the last operand), not its sources, unless --remove-source-files deletes
+ * them. A remote destination (`host:path`, `user@host:path`, `rsync://…`) is not a local write.
+ * @param {Word[]} args
+ */
+function rsyncWrites(args) {
+  if (args.some((a) => a.value === '-n' || a.value === '--dry-run')) return null;
+  const operands = flagPaths(args);
+  if (!operands) return null;
+  const dest = operands[operands.length - 1];
+  const out = args.some((a) => a.value === '--remove-source-files') ? operands.slice(0, -1).filter((p) => p == null || !isRemote(p)) : [];
+  if (dest == null || !isRemote(dest)) out.push(dest);
+  return out.length ? out : null;
+}
+
+/** `host:path`, `user@host:path`, `host::module` or `rsync://…`: a colon before any slash. */
+const isRemote = (p) => /^rsync:\/\//.test(p) || /^[^/]*:/.test(p);
 
 /** Non-option operands, as literals or `null` when the word expands. Empty words are dropped. `null` result means no path. */
 function flagPaths(args) {
@@ -630,9 +648,20 @@ function gitConfig(rest) {
 
 /** @param {Word[]} rest */
 function gitWorktree(rest) {
-  const sub = rest.find((a) => !a.value.startsWith('-'))?.value;
+  const at = rest.findIndex((a) => !a.value.startsWith('-'));
+  const sub = at < 0 ? '' : rest[at].value;
   if (!sub || sub === 'list') return null;
-  return [null];
+  const want = sub === 'add' || sub === 'remove' ? 1 : sub === 'move' ? 2 : 0;
+  if (!want) return [null];
+  // add's -b/-B/--reason take a value; the rest of its flags, and remove's -f, do not.
+  const paths = [];
+  for (let i = at + 1; i < rest.length && paths.length < want; i++) {
+    const v = rest[i].value;
+    if (v === '-b' || v === '-B' || v === '--reason') { i++; continue; }
+    if (v.startsWith('-')) continue;
+    paths.push(rest[i].expandable ? null : v);
+  }
+  return paths.length === want ? paths : [null];
 }
 
 /** @param {Word[]} rest @param {number} depth */

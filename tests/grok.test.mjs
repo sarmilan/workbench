@@ -129,6 +129,9 @@ test('on main Grok may sync the branch, clear a git lock, and write under HOME',
     assert.equal(shellEdit(dir, 'jq . x > "$HOME/.claude-work/settings.json"'), null);
     assert.match(shellEdit(dir, 'git pull && rm src/a.ts').reason, /No brief for main/);
     assert.match(shellEdit(dir, 'echo hi > src/a.ts').reason, /No brief for main/);
+    assert.equal(shellEdit(dir, 'git worktree add ../grok-wt-x -b feat/x'), null);
+    assert.equal(shellEdit(dir, 'rsync -a prompt.md devbox:~/prompt.md'), null);
+    assert.match(shellEdit(dir, 'git worktree add ./inside').reason, /No brief for main/);
     execFileSync('git', ['switch', '-q', '-c', 'feature/x'], { cwd: dir });
     assert.match(shellEdit(dir, 'git pull --ff-only').reason, /wait for the session brief/);
   } finally {
