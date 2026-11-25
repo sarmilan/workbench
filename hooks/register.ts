@@ -1,5 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { approvalRecord, briefFile, briefStatus, checkoutName, inWorkTree, isGitLock, mainCheckoutNote, NO_BRIEF_BRANCHES, parseBrief } from '../bin/brief.mjs'
+import { approvalRecord, briefFile, briefStatus, checkoutName, inWorkTree, isGitLock, mainCheckout, mainCheckoutNote, NO_BRIEF_BRANCHES, parseBrief } from '../bin/brief.mjs'
 import { outsideRepoNote } from '../bin/brief-instructions.mjs'
 import * as act from './activity.ts'
 import { goAhead } from './goahead.ts'
@@ -84,8 +84,8 @@ const gitHead = async ($: EngineInterface) => {
   if (topLine.startsWith('/') && !topLine.includes('\n')) root = topLine
   return { cwd, common, branch, root }
 }
-const readBrief = async ($: EngineInterface): Promise<Brief | null> => {
-  const head = await gitHead($)
+const readBrief = async ($: EngineInterface, known?: Awaited<ReturnType<typeof gitHead>>): Promise<Brief | null> => {
+  const head = known === undefined ? await gitHead($) : known
   if (!head || NO_BRIEF_BRANCHES.includes(head.branch)) return null
   const { common, branch } = head
   const path = briefFile(common, branch, 'md')
@@ -149,23 +149,21 @@ const gateReason = (b: Brief) => {
 
 // Why an edit of `file` is refused, or null to let it through. The brief itself (anything under
 // .git/session-rail/) can always be written, except its approval file, and so can git's own lock files.
-// On a checkout with no brief, a path inside the work tree is refused; a path outside it is left alone.
+// On any branch, a path outside the repo (this checkout and the main checkout) is not a code edit. Inside
+// it, a checkout with no brief (main, master, detached) refuses the edit, and a branch waits for its brief.
 const gate = async ($: EngineInterface, tool: string, file: string) => {
   if (isGitLock(file)) return null
-  const b = await readBrief($)
-  if (!b) {
-    const head = await gitHead($)
-    if (!head || !NO_BRIEF_BRANCHES.includes(head.branch) || !inWorkTree(head.root || head.cwd, file)) return null
-    const reason = mainCheckoutNote(head.branch)
+  const head = await gitHead($)
+  if (!head) return null
+  const b = await readBrief($, head)
+  const refuse = (reason: string) => {
     record($, a => act.refused(a, tool, file, Date.now()))
     return reason
   }
-  const reason =
-    file === b.approvedPath ? 'session-rail: only the person approves the brief, in the desk, with /approve-brief, or with a message that is exactly approved.'
-    : file.startsWith(b.dir) || b.approval?.approvedAt ? null
-    : gateReason(b)
-  if (reason) record($, a => act.refused(a, tool, file, Date.now()))
-  return reason
+  if (b && file === b.approvedPath) return refuse('session-rail: only the person approves the brief, in the desk, with /approve-brief, or with a message that is exactly approved.')
+  if (!inWorkTree([head.root || head.cwd, mainCheckout(head.common)], file)) return null
+  if (!b) return NO_BRIEF_BRANCHES.includes(head.branch) ? refuse(mainCheckoutNote(head.branch)) : null
+  return file.startsWith(b.dir) || b.approval?.approvedAt ? null : refuse(gateReason(b))
 }
 
 // A shell write waits on the same gate as Edit. shellWrites names the files; a `null` entry is a write

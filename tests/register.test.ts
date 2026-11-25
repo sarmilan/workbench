@@ -99,7 +99,7 @@ As a dev, I should be able to Y so I can Z.
 ### Chunk 1: first
 Do the first thing.
 `
-const briefHarness = (on: Parameters<Parameters<typeof test>[1]>[1], { branch = 'feature/x', brief = null as string | null, cwd = '/repo', rebase = '' } = {}) => {
+const briefHarness = (on: Parameters<Parameters<typeof test>[1]>[1], { branch = 'feature/x', brief = null as string | null, cwd = '/repo', rebase = '', top = '/repo' } = {}) => {
   const base = `/repo/.git/session-rail/briefs/${encodeURIComponent(branch)}`
   const files: Record<string, string> = brief === null ? {} : { [`${base}.md`]: brief }
   if (rebase) files['/repo/.git/rebase-merge/head-name'] = rebase.endsWith('\n') ? rebase : `${rebase}\n`
@@ -109,7 +109,7 @@ const briefHarness = (on: Parameters<Parameters<typeof test>[1]>[1], { branch = 
   on('process.run', (_, e) => {
     const a = (e.argv ?? []).join(' ')
     const out = e.argv[0] !== 'git' ? '{"state":"opened"}\n'
-      : a.includes('--show-toplevel') ? '/repo\n'
+      : a.includes('--show-toplevel') ? `${top}\n`
       : a.includes('--git-dir') && !a.includes('--git-common-dir') ? '/repo/.git\n'
       : `/repo/.git\n${branch}\n`
     return { value: { exitCode: 0, stdout: out, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -234,6 +234,25 @@ test('on main, a write under HOME outside the repo is not refused', async ($, on
   expect(edits).toEqual(cmds.map(c => `bash:${c}`))
   const weird = (await $.tool.call(bash('echo hi > $SOMEWHERE/x'))) as { deny?: string }
   expect(weird.deny).toContain('No brief for main')
+})
+
+test('on a feature branch, a file outside the repo is not refused before the brief', async ($, on) => {
+  const { edits } = briefHarness(on)
+  await $.tool.call(edit('/tmp/scratchpad/draft.md'))
+  await $.tool.call(bash('echo hi > /tmp/scratchpad/issue.md'))
+  expect(edits).toEqual(['/tmp/scratchpad/draft.md', 'bash:echo hi > /tmp/scratchpad/issue.md'])
+  const r = (await $.tool.call(edit('/repo/src/a.ts'))) as { deny?: string }
+  expect(r.deny).toContain('wait for the session brief')
+})
+
+test('in a linked worktree, both the worktree and the main checkout wait for the brief', async ($, on) => {
+  const { base, edits } = briefHarness(on, { cwd: '/repo.worktrees/x', top: '/repo.worktrees/x' })
+  for (const f of ['/repo.worktrees/x/src/a.ts', '/repo/src/a.ts']) {
+    expect(((await $.tool.call(edit(f))) as { deny?: string }).deny).toContain('wait for the session brief')
+  }
+  expect(((await $.tool.call(edit(`${base}.approved.json`))) as { deny?: string }).deny).toContain('only the person approves')
+  await $.tool.call(edit('/tmp/plan.md'))
+  expect(edits).toEqual(['/tmp/plan.md'])
 })
 
 test('on a feature branch, git pull still waits for the brief', async ($, on) => {
