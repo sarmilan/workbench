@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { devboxStatus, sshProbe } from '../bin/sources.mjs';
 import { byHost, parseProbe, parseResult, POLL_MS, probeScript, stale, taskRows, taskState } from '../bin/devbox.mjs';
 
 test('a task state follows the pid, the exit code, the result and the slot marker', () => {
@@ -109,4 +110,83 @@ test('the cache is stale after the poll interval, and trackers group by host', (
   assert.equal(stale(1000, 1000 + POLL_MS), true);
   assert.equal(stale(undefined, 5), true);
   assert.deepEqual(Object.keys(byHost([{ task: 'a' }, { task: 'b', host: 'h' }, { task: 'c' }])), ['devbox', 'h']);
+});
+
+// ── devboxStatus: trackers, the shared cache and the unreachable fallback, with a fake ssh ──
+
+const M = '::session-rail::';
+const probeOut = (task, { alive = 0, exit = '', result = '' } = {}) =>
+  [`${M} task ${task}`, `${M} alive ${alive}`, `${M} exit ${exit}`, `${M} slot `, `${M} result`, result, `${M} log`, 'tail', `${M} diff`, `${M} end`].join('\n');
+
+function repo() {
+  const dir = mkdtempSync(join(tmpdir(), 'devbox-repo-'));
+  execFileSync('git', ['init', '-q'], { cwd: dir });
+  return dir;
+}
+const track = (dir, t) => {
+  mkdirSync(join(dir, '.claude', 'hetzner-dispatch'), { recursive: true });
+  writeFileSync(join(dir, '.claude', 'hetzner-dispatch', `${t.task}.json`), JSON.stringify({ branch: `feat/hetzner-${t.task}`, started: '2026-11-26T10:00:00Z', ...t }));
+};
+
+test('no trackers means no ssh call and an inactive view', async () => {
+  const dir = repo();
+  let calls = 0;
+  const r = await devboxStatus(dir, { probe: async () => { calls++; return { code: 0, out: '' }; }, prList: async () => ({ ok: true, items: [] }) });
+  assert.equal(r.active, false);
+  assert.equal(calls, 0);
+});
+
+test('a fresh cache is reused, a stale one or a new tracker refreshes it', async () => {
+  const dir = repo();
+  track(dir, { task: 'A' });
+  const calls = [];
+  const probe = async (host, script) => { calls.push(host); return { code: 0, out: probeOut('A', { alive: 1 }) + '\n' + (script.includes("task B'") ? probeOut('B', { exit: 0, result: JSON.stringify({ result: JSON.stringify({ status: 'success', pr_number: 4 }) }) }) : '') }; };
+  const prList = async () => ({ ok: true, items: [{ number: 9, url: 'u9', headRefName: 'feat/hetzner-A' }, { number: 1, url: 'u1', headRefName: 'other' }] });
+  const t0 = 1_000_000;
+  let r = await devboxStatus(dir, { probe, prList, now: t0 });
+  assert.deepEqual(r.rows.map((x) => [x.task, x.state, x.pr?.number]), [['A', 'running', 9]]);
+  r = await devboxStatus(dir, { probe, prList, now: t0 + 10_000 });
+  assert.equal(calls.length, 1);
+  const cache = JSON.parse(readFileSync(join(dir, '.git', 'session-rail', 'devbox.json'), 'utf8'));
+  assert.deepEqual(cache.prs.map((p) => p.number), [9]);
+  track(dir, { task: 'B', host: 'box2' });
+  r = await devboxStatus(dir, { probe, prList, now: t0 + 20_000 });
+  assert.deepEqual(calls.slice(1).sort(), ['box2', 'devbox']);
+  assert.deepEqual(r.rows.map((x) => [x.task, x.host]), [['A', 'devbox'], ['B', 'box2']]);
+  await devboxStatus(dir, { probe, prList, now: t0 + 20_000 + 45_000 });
+  assert.equal(calls.length, 5);
+  rmSync(join(dir, '.claude', 'hetzner-dispatch', 'B.json'));
+  r = await devboxStatus(dir, { probe, prList, now: t0 + 70_000 });
+  assert.deepEqual(r.rows.map((x) => x.task), ['A']);
+});
+
+test('an unreachable box is one line with the last error, and the last known tasks stay', async () => {
+  const dir = repo();
+  track(dir, { task: 'A' });
+  const ok = async () => ({ code: 0, out: probeOut('A', { alive: 1 }) });
+  const down = async () => ({ code: 255, out: '', err: 'debug\nssh: connect to host devbox port 22: Operation timed out\n' });
+  const prList = async () => ({ ok: false, items: [] });
+  await devboxStatus(dir, { probe: ok, prList, now: 1_000_000 });
+  const r = await devboxStatus(dir, { probe: down, prList, now: 1_100_000 });
+  assert.deepEqual(r.unreachable, [{ host: 'devbox', error: 'ssh: connect to host devbox port 22: Operation timed out' }]);
+  assert.deepEqual(r.rows.map((x) => [x.task, x.state]), [['A', 'running']]);
+  const thrown = await devboxStatus(dir, { probe: async () => { throw new Error('boom'); }, prList, now: 1_200_000 });
+  assert.equal(thrown.unreachable[0].error, 'boom');
+});
+
+test('a refresh another pane claimed is not started again', async () => {
+  const dir = repo();
+  track(dir, { task: 'A' });
+  mkdirSync(join(dir, '.git', 'session-rail'), { recursive: true });
+  writeFileSync(join(dir, '.git', 'session-rail', 'devbox.json'), JSON.stringify({ at: 0, claim: 1_000_000 - 5_000, probe: {} }));
+  let calls = 0;
+  const r = await devboxStatus(dir, { probe: async () => { calls++; return { code: 0, out: '' }; }, prList: async () => ({ ok: true, items: [] }), now: 1_000_000 });
+  assert.equal(calls, 0);
+  assert.deepEqual(r.rows.map((x) => [x.task, x.state]), [['A', 'unknown']]);
+});
+
+test('the ssh runner refuses a host name that could be an option', async () => {
+  const r = await sshProbe('-oProxyCommand=x', 'true');
+  assert.equal(r.code, 255);
+  assert.match(r.err, /bad host name/);
 });
