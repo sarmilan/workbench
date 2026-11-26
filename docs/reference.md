@@ -85,7 +85,7 @@ Refresh: the tree about once a minute, on switching to Git, on `r`, and on a bra
 | Key | Does |
 |---|---|
 | `↑` `↓`, click | move |
-| `Enter` | expand an agent, chapter or branch; open a prompt, reply, check, pull request or task output; jump to a session's iTerm window |
+| `Enter` | expand an agent, chapter or branch; open a prompt, reply, check, pull request or task output; jump to a session's iTerm window; open a devbox task in the desk |
 | `Esc` | back |
 | `Tab` / `Shift-Tab`, `]` / `[` | switch tabs |
 | `r` | refresh |
@@ -96,7 +96,7 @@ Refresh: the tree about once a minute, on switching to Git, on `r`, and on a bra
 
 ## The desk
 
-`bin/desk.mjs`, the middle pane. Tabs: **Plan**, **Diff**, **Review**.
+`bin/desk.mjs`, the middle pane. Tabs: **Plan**, **Diff**, **Review**, **Devbox**.
 
 ```
 ┌─ desk ───────────────────────────────────────────────────────────────────────┐
@@ -118,6 +118,8 @@ Refresh: the tree about once a minute, on switching to Git, on `r`, and on a bra
 - **Diff.** Every file changed since the merge-base with the default branch (the same base as the rail's `+N −N`), including untracked files marked `new`, grouped under the brief's chunks with each chunk's `Done:` summary. Open a file for its diff.
 - **Review.** The branch's review record: the approach review, the latest `/code-review` (each finding with file and line; `Enter` jumps to it in the diff), and wide reviews. Each finding is ● open, ✓ applied or ✗ declined (code findings: ✓ fixed, ✓ no change, ✓ skipped); declined findings show the reason. Older runs collapse to one line. The tab warns when the pull request is merged, or mergeable by a person, while the record is not clean.
 
+- **Devbox.** Tasks dispatched to a devbox from this repo (trackers in `.claude/hetzner-dispatch/` of the main checkout): state, age, host, PR and branch. `Enter` opens one: tracker fields, the result (status, PR URL, commit, summary, blockers), the diff stat against the default branch and the last 30 log lines; `o` opens its PR. An unreachable host is one line on top with the ssh error. `Enter` on a task in the rail opens this tab on that task. With no trackers it says so and runs nothing.
+
 The desk opens on Plan. Diff and Review keep their position until you switch.
 
 ![the desk's plan tab showing an approved brief: problem, solution, design, mockups and engineering chunks](media/desk-plan-brief.png)
@@ -126,11 +128,12 @@ The desk opens on Plan. Diff and Review keep their position until you switch.
 
 | Key | Does |
 |---|---|
-| `Tab` / `Shift-Tab`, `1` `2` `3`, click | switch tabs |
+| `Tab` / `Shift-Tab`, `1` `2` `3` `4`, click | switch tabs |
 | `↑` `↓`, `j` `k`, mouse wheel | move or scroll |
 | `Space` / `b`, `PgDn` / `PgUp`, `g` / `G` | page, top, bottom |
-| `Enter` | open a file (Diff); jump to a code finding's line (Review) |
+| `Enter` | open a file (Diff); jump to a code finding's line (Review); open a task (Devbox) |
 | `n` `p`, `Esc` | next / previous file, back to the list |
+| `o` | open the task's pull request (Devbox) |
 | `A` | approve the brief (Plan) |
 | `r` | run an approach review (Review); refresh (other tabs) |
 | `w` | wide review, when the diff is wide and Wide review is on (Review) |
