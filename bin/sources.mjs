@@ -1248,8 +1248,8 @@ async function readTrackers(dir) {
 const lastLine = (s) => oneLine(String(s ?? '').trim().split('\n').filter((l) => l.trim()).pop() ?? '');
 
 /**
- * The devbox tasks for the repo at `cwd`: `{ active, rows, unreachable: [{ host, error }], at }`.
- * `active` is false when the repo has no trackers. Never throws.
+ * The devbox tasks for the repo at `cwd`: `{ active, rows, unreachable: [{ host, error }], at, goto }`.
+ * `active` is false when the repo has no trackers. `goto` is the rail's last Enter on a task (devboxGoto). Never throws.
  * @param {string} cwd
  * @param {{ probe?: typeof sshProbe, prList?: (cwd: string) => Promise<{ ok: boolean, items: any[] }>, now?: number }} [opts]
  */
@@ -1271,10 +1271,19 @@ export async function devboxStatus(cwd, { probe = sshProbe, prList = prs, now = 
       rows: taskRows(trackers, cache.probe ?? {}, cache.prs ?? []),
       unreachable: (cache.unreachable ?? []).map(({ host, error }) => ({ host, error })),
       at: cache.at ?? 0,
+      goto: await readJson(join(common, 'session-rail', 'devbox-goto.json')),
     };
   } catch {
     return { active: false, rows: [], unreachable: [], at: 0 };
   }
+}
+
+// The rail's Enter on a task: the desk's next devbox poll switches to its tab with that task open.
+export async function devboxGoto(cwd, { task, session } = {}) {
+  const common = (await run('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd }))?.trim();
+  if (!common || !task) return false;
+  await saveJson(join(common, 'session-rail', 'devbox-goto.json'), { task, session: session ?? null, at: Date.now() });
+  return true;
 }
 
 async function saveJson(file, value) {
