@@ -121,7 +121,8 @@ const loaders = {
   },
   async connectors() { data.connectors = await src.connectors(hostOf()); },
   // Dispatched devbox tasks. Nothing runs without a tracker; the ssh refresh is the shared 45s cache.
-  async devbox() { data.devbox = await src.devboxStatus(cwd); },
+  // A frame reads the cache only (the Stop hook draws one), so it never waits on ssh.
+  async devbox() { data.devbox = await src.devboxStatus(cwd, { refresh: !args.includes('--frame') }); },
 };
 
 // Cwds of sessions that are still running. The overview is the same list with branches filled in.

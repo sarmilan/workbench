@@ -1253,7 +1253,7 @@ const lastLine = (s) => oneLine(String(s ?? '').trim().split('\n').filter((l) =>
  * @param {string} cwd
  * @param {{ probe?: typeof sshProbe, prList?: (cwd: string) => Promise<{ ok: boolean, items: any[] }>, now?: number }} [opts]
  */
-export async function devboxStatus(cwd, { probe = sshProbe, prList = prs, now = Date.now() } = {}) {
+export async function devboxStatus(cwd, { probe = sshProbe, prList = prs, now = Date.now(), refresh = true } = {}) {
   try {
     const common = (await run('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd }))?.trim();
     const main = checkoutOf(common ?? '');
@@ -1262,10 +1262,12 @@ export async function devboxStatus(cwd, { probe = sshProbe, prList = prs, now = 
     if (!trackers.length) return { active: false, rows: [], unreachable: [], at: 0 };
     const file = join(common, 'session-rail', 'devbox.json');
     let cache = (await readJson(file)) ?? {};
-    const known = new Set(Object.keys(cache.probe ?? {}).concat((cache.unreachable ?? []).flatMap((u) => u.tasks ?? [])));
+    // Every task the last refresh asked about, seen or not: a task the probe can't report (a name probeScript
+    // skips, a box that printed nothing for it) must not make every poll run ssh again.
+    const known = new Set(cache.checked ?? []);
     const fresh = !stale(cache.at, now) && trackers.every((t) => known.has(t.task));
     const claimed = Number.isFinite(cache.claim) && now - cache.claim < DEVBOX_CLAIM_MS;
-    if (!fresh && !claimed) cache = await refreshDevbox(cwd, file, cache, trackers, { probe, prList, now });
+    if (refresh && !fresh && !claimed) cache = await refreshDevbox(cwd, file, cache, trackers, { probe, prList, now });
     return {
       active: true,
       rows: taskRows(trackers, cache.probe ?? {}, cache.prs ?? []),
@@ -1320,7 +1322,7 @@ async function refreshDevbox(cwd, file, cache, trackers, { probe, prList, now })
   const prsKept = open?.ok
     ? open.items.filter((p) => branches.has(p.headRefName)).map(({ number, url, headRefName }) => ({ number, url, headRefName }))
     : cache.prs ?? [];
-  const next = { at: now, probe: probed, prs: prsKept, unreachable };
+  const next = { at: now, checked: [...live], probe: probed, prs: prsKept, unreachable };
   await saveJson(file, next);
   return next;
 }

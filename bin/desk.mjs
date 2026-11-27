@@ -11,7 +11,7 @@
 // It opens on Plan. A change of the plan selects Plan again. Diff and Review stay until you switch them.
 //   node desk.mjs                                   interactive panel
 //   node desk.mjs --json                            print the collected state once
-//   node desk.mjs --frame [W H] [--tab plan|diff|review] [--file N]   print one rendered frame (no TTY needed)
+//   node desk.mjs --frame [W H] [--tab plan|diff|review|devbox] [--file N] [--task NAME]   print one rendered frame (no TTY needed)
 //     [--review-json F --select N --jump N]          …with a saved review record (reviewer.mjs's store shape)
 //     [--pr-json F] [--head SHA]                     …and a pull request, for the merge warning
 //   --cwd DIR / --pid PID                           the folder and Claude process this desk belongs to
@@ -77,9 +77,14 @@ const loaders = {
     if (!data.brief?.text || !data.todos) data.todos = await src.todos(cwd);
   },
   // Dispatched devbox tasks (sources.devboxStatus: the cache the rail shares). The rail's Enter on a task
-  // (devboxGoto) selects this tab with that task open, when it was this session's rail.
+  // (devboxGoto) selects this tab with that task open, when it was this session's rail. A frame of another
+  // tab reads the cache only, so it never waits on ssh.
   async devbox() {
-    data.devbox = await src.devboxStatus(cwd);
+    const refresh = !args.includes('--frame') || flag('--tab') === 'devbox';
+    data.devbox = await src.devboxStatus(cwd, { refresh });
+    // A task whose tracker was reaped while it was open: back to the list, so the keys move the selection again.
+    if (ui.dopen && !devboxRows().some((r) => r.task === ui.dopen)) ui.dopen = null;
+    ui.dsel = Math.max(0, Math.min(ui.dsel, devboxRows().length - 1));
     const go = data.devbox.goto;
     if (!go?.task || !(go.at > seen.goto)) return;
     seen.goto = go.at;
