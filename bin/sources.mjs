@@ -1253,7 +1253,7 @@ const lastLine = (s) => oneLine(String(s ?? '').trim().split('\n').filter((l) =>
  * @param {string} cwd
  * @param {{ probe?: typeof sshProbe, prList?: (cwd: string) => Promise<{ ok: boolean, items: any[] }>, now?: number }} [opts]
  */
-export async function devboxStatus(cwd, { probe = sshProbe, prList = prs, now = Date.now() } = {}) {
+export async function devboxStatus(cwd, { probe = sshProbe, prList = prs, now = Date.now(), refresh = true } = {}) {
   try {
     const common = (await run('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd }))?.trim();
     const main = checkoutOf(common ?? '');
@@ -1267,7 +1267,7 @@ export async function devboxStatus(cwd, { probe = sshProbe, prList = prs, now = 
     const known = new Set(cache.checked ?? []);
     const fresh = !stale(cache.at, now) && trackers.every((t) => known.has(t.task));
     const claimed = Number.isFinite(cache.claim) && now - cache.claim < DEVBOX_CLAIM_MS;
-    if (!fresh && !claimed) cache = await refreshDevbox(cwd, file, cache, trackers, { probe, prList, now });
+    if (refresh && !fresh && !claimed) cache = await refreshDevbox(cwd, file, cache, trackers, { probe, prList, now });
     return {
       active: true,
       rows: taskRows(trackers, cache.probe ?? {}, cache.prs ?? []),

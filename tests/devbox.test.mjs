@@ -198,6 +198,16 @@ test('a task the probe cannot report does not run ssh on every poll', async () =
   assert.deepEqual(r.rows.map((x) => [x.task, x.state]).sort(), [['fix login bug', 'unknown'], ['ok', 'running']]);
 });
 
+test('refresh false reads the cache only and never probes', async () => {
+  const dir = repo();
+  track(dir, { task: 'ok' });
+  let calls = 0;
+  const probe = async () => { calls++; return { code: 0, out: probeOut('ok', { alive: 1 }) }; };
+  const r = await devboxStatus(dir, { probe, prList: async () => ({ ok: true, items: [] }), now: 1_000_000, refresh: false });
+  assert.equal(calls, 0);
+  assert.deepEqual(r.rows.map((x) => [x.task, x.state]), [['ok', 'unknown']]);
+});
+
 test('the ssh runner refuses a host name that could be an option', async () => {
   const r = await sshProbe('-oProxyCommand=x', 'true');
   assert.equal(r.code, 255);
