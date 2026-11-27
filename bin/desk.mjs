@@ -80,6 +80,9 @@ const loaders = {
   // (devboxGoto) selects this tab with that task open, when it was this session's rail.
   async devbox() {
     data.devbox = await src.devboxStatus(cwd);
+    // A task whose tracker was reaped while it was open: back to the list, so the keys move the selection again.
+    if (ui.dopen && !devboxRows().some((r) => r.task === ui.dopen)) ui.dopen = null;
+    ui.dsel = Math.max(0, Math.min(ui.dsel, devboxRows().length - 1));
     const go = data.devbox.goto;
     if (!go?.task || !(go.at > seen.goto)) return;
     seen.goto = go.at;

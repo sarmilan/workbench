@@ -149,7 +149,7 @@ export function taskRows(trackers, probe, prs) {
     const seen = probe?.[t.task];
     const result = seen?.result ?? null;
     const open = t.branch ? (prs ?? []).find((p) => p?.headRefName === t.branch) : null;
-    const number = open?.number ?? (Number.isInteger(Number(result?.pr_number)) && result?.pr_number != null ? Number(result.pr_number) : null);
+    const number = open?.number ?? (Number.isInteger(Number(result?.pr_number)) && Number(result?.pr_number) > 0 ? Number(result.pr_number) : null);
     const url = open?.url ?? (typeof result?.pr_url === 'string' ? result.pr_url : '');
     rows.push({
       task: t.task,
