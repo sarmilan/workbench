@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import * as act from './activity.mjs';
 import { humanAsk, keep } from './sessionstory.mjs';
 import { briefInstructions, outsideRepoNote } from './brief-instructions.mjs';
-import { approvalRecord, briefFile, briefStatus, briefWriteOnMain, checkoutName, inWorkTree, isGitLock, mainCheckout, mainCheckoutNote, NO_BRIEF_BRANCHES, parseBrief, trackerWrite } from './brief.mjs';
+import { approvalRecord, briefFile, briefStatus, briefWriteOnMain, checkoutName, inWorkTree, isGitLock, mainCheckout, mainCheckoutNote, NO_BRIEF_BRANCHES, parseBrief } from './brief.mjs';
 import { codeRun, gateReason as reviewWait, keptRuns, mergesPr, reportFromText, reviewsFile } from './cadence.mjs';
 import { resolveWritePath, shellWrites } from './shellwrite.mjs';
 import { findAgent, railHome } from './host.mjs';
@@ -79,7 +79,6 @@ export function editReason(b, file, checkout) {
   if (isGitLock(file)) return null;
   if (b && file === b.approvedPath) return 'session-rail: only the person approves the brief, in the desk, with /approve-brief, or with a message that is exactly approved.';
   if (checkout?.cwd && !inWorkTree([checkout.cwd, checkout.main], file)) return null;
-  if (trackerWrite(checkout?.main, file)) return null;
   if (!b) {
     const branch = checkout?.branch;
     if (!branch || !NO_BRIEF_BRANCHES.includes(branch) || briefWriteOnMain(checkout.common, file)) return null;

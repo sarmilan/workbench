@@ -120,8 +120,6 @@ const loaders = {
     if (ui.tab === 'git') await publishMap();
   },
   async connectors() { data.connectors = await src.connectors(hostOf()); },
-  // Dispatched devbox tasks. Nothing runs without a tracker; the ssh refresh is the shared 45s cache.
-  async devbox() { data.devbox = await src.devboxStatus(cwd); },
 };
 
 // Cwds of sessions that are still running. The overview is the same list with branches filled in.
@@ -350,12 +348,6 @@ const goTo = (s) => {
   if (s.current) return toast('This is the current session');
   if (!s.tty) return agentMenu(s);
   pane(['focus', s.tty], (state) => { if (state !== 'focused') toast(state === 'not-found' ? 'Not an iTerm tab' : "Couldn't switch"); });
-};
-
-// Enter on a devbox task: open the desk on its Devbox tab with that task selected.
-const openDevboxTask = async (row) => {
-  await src.devboxGoto(cwd, { task: row.task, session: data.current?.sessionId });
-  pane(['open', 'desk'], (state) => { if (state === 'error') toast('Could not open the desk'); });
 };
 
 // + new: the problem typed on the bottom line becomes a worktree and a new window running claude "/start <problem>".
@@ -687,23 +679,6 @@ function buildMain(W) {
     blocked: [() => fg(C.red, '⧗'), (s) => fg(C.red, s)],
     idle: [() => dim('○'), dim],
   };
-  // Devbox tasks this repo dispatched: glyph, name, PR or state, age. Enter opens the task in the desk.
-  const TASK = {
-    running: () => fg(C.accent, ui.tick % 2 ? '●' : '◉'), done: () => fg(C.green, '✔'), failed: () => fg(C.red, '✗'),
-    'timed out': () => fg(C.red, '⧗'), refused: () => fg(C.yellow, '⊘'), blocked: () => fg(C.yellow, '◆'), unknown: () => dim('○'),
-  };
-  const devboxRows = () => {
-    const dbx = data.devbox;
-    if (!dbx?.active) return;
-    for (const r of dbx.rows) {
-      const id = item(`devbox:${r.task}`, () => openDevboxTask(r));
-      const right = `${r.pr?.number ? `#${r.pr.number}` : r.state}${r.started ? ` · ${ago(r.started)}` : ''}`;
-      const name = trunc(clean(r.task), Math.max(4, inner - 6 - width(right) - 1));
-      const gap = Math.max(1, inner - 6 - width(name) - width(right));
-      line(`    ${(TASK[r.state] ?? TASK.unknown)()} ${name}${' '.repeat(gap)}${dim(right)}`, id);
-    }
-    for (const u of dbx.unreachable) line(dim(trunc(`    devbox: unreachable${u.host !== 'devbox' ? ` (${clean(u.host)})` : ''}`, inner)), item(`devbox-down:${u.host}`, () => toast(clean(u.error))));
-  };
   for (const s of list) {
     const id = item(`session:${s.sessionId || s.pid}`, () => goTo(s));
     const [dot, paint] = STATE[s.state] ?? STATE.idle;
@@ -712,9 +687,7 @@ function buildMain(W) {
     const gap = Math.max(1, inner - 4 - width(l) - width(right));
     line(`${s.current ? '▸' : ' '} ${dot()} ${s.current ? bold(l) : l}${' '.repeat(gap)}${paint(right)}`, id);
     pair(`    ${[s.repo, s.branch, clean(s.doing)].filter(Boolean).join(' · ')}`, '', id, { leftStyle: dim });
-    if (s.current) devboxRows();
   }
-  if (!list.some((s) => s.current)) devboxRows();
   if (choresEnabled) line(dim('  ↻ Re-run failing CI'), item('chore-start', startChoreFromRail));
 
   // This session: who is working, the words they were handed, and how the problem got here.
@@ -1089,7 +1062,7 @@ const refresh = (name) => {
   let busy = false;
   return async () => { if (busy) return; busy = true; try { await loaders[name](); } catch {} busy = false; draw(); };
 };
-const schedule = { fast: 1000, sessions: 3000, env: 5000, account: 5000, devbox: 5000, prs: 60_000, worktrees: 60_000, connectors: 300_000 };
+const schedule = { fast: 1000, sessions: 3000, env: 5000, account: 5000, prs: 60_000, worktrees: 60_000, connectors: 300_000 };
 const runners = Object.fromEntries(Object.keys(schedule).map((k) => [k, refresh(k)]));
 refreshWorktrees = () => { if (ui.tab === 'git') runners.worktrees(); };
 for (const [k, ms] of Object.entries(schedule)) { runners[k](); setInterval(runners[k], ms); }

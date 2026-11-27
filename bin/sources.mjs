@@ -1,10 +1,9 @@
 // Data sources for the session rail. Every exported function resolves to plain JSON and never throws.
 import { execFile } from 'node:child_process';
-import { readFile, readdir, lstat, stat, open, unlink, writeFile, rename, mkdir } from 'node:fs/promises';
+import { readFile, readdir, lstat, stat, open, unlink } from 'node:fs/promises';
 import { hostname, homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { parseBrief, briefStatus, NO_BRIEF_BRANCHES, mainCheckout as checkoutOf } from './brief.mjs';
-import { byHost, probeScript, parseProbe, stale, taskRows } from './devbox.mjs';
+import { parseBrief, briefStatus, NO_BRIEF_BRANCHES } from './brief.mjs';
 import { buildTree, reviewLineFrom } from './branchmap.mjs';
 import { activityNames, mainCheckout, planWorktrees, staleActivity, ACTIVITY_GRACE_MS } from './prune.mjs';
 import { eventsFromRecord, keep, splitAsk } from './sessionstory.mjs';
@@ -1214,113 +1213,3 @@ async function exitMarker(path) {
 }
 
 export const exists = async (p) => { try { await stat(p); return true; } catch { return false; } };
-
-// ── Devbox dispatch status ───────────────────────────────────────────────────
-// Trackers are <main checkout>/.claude/hetzner-dispatch/*.json, written by the dispatch flow. Nothing runs
-// while there are none, so other repos never call ssh. The probe result is cached in
-// <common>/session-rail/devbox.json, shared by the rail and the desk: whichever finds it stale refreshes it
-// (a fresh `claim` in the file tells the other pane a refresh is already under way). Rows are joined on each
-// read, so a reaped tracker leaves at once.
-const DEVBOX_CLAIM_MS = 20_000;
-const HOST_NAME = /^[A-Za-z0-9][A-Za-z0-9._@-]{0,80}$/;
-
-// One ssh call with the probe script on stdin. 255 is ssh's own failure (unreachable, auth refused).
-export const sshProbe = (host, script, { timeout = 15_000 } = {}) =>
-  new Promise((resolve) => {
-    if (!HOST_NAME.test(host)) { resolve({ code: 255, out: '', err: `bad host name: ${host}` }); return; }
-    const child = execFile('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', host, 'bash', '-s'],
-      { timeout, maxBuffer: 4 << 20 }, (err, stdout, stderr) => resolve({
-        code: err ? (typeof err.code === 'number' ? err.code : 255) : 0,
-        out: stdout?.toString() ?? '',
-        err: err?.killed ? `timed out after ${timeout / 1000}s` : stderr?.toString() ?? '',
-      }));
-    child.stdin?.on('error', () => {});
-    child.stdin?.end(script);
-  });
-
-async function readTrackers(dir) {
-  let names = [];
-  try { names = (await readdir(dir)).filter((n) => n.endsWith('.json')).sort(); } catch { return []; }
-  const list = await Promise.all(names.map((n) => readJson(join(dir, n))));
-  return list.filter((t) => t && typeof t.task === 'string' && t.task);
-}
-
-const lastLine = (s) => oneLine(String(s ?? '').trim().split('\n').filter((l) => l.trim()).pop() ?? '');
-
-/**
- * The devbox tasks for the repo at `cwd`: `{ active, rows, unreachable: [{ host, error }], at, goto }`.
- * `active` is false when the repo has no trackers. `goto` is the rail's last Enter on a task (devboxGoto). Never throws.
- * @param {string} cwd
- * @param {{ probe?: typeof sshProbe, prList?: (cwd: string) => Promise<{ ok: boolean, items: any[] }>, now?: number }} [opts]
- */
-export async function devboxStatus(cwd, { probe = sshProbe, prList = prs, now = Date.now() } = {}) {
-  try {
-    const common = (await run('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd }))?.trim();
-    const main = checkoutOf(common ?? '');
-    if (!main) return { active: false, rows: [], unreachable: [], at: 0 };
-    const trackers = await readTrackers(join(main, '.claude', 'hetzner-dispatch'));
-    if (!trackers.length) return { active: false, rows: [], unreachable: [], at: 0 };
-    const file = join(common, 'session-rail', 'devbox.json');
-    let cache = (await readJson(file)) ?? {};
-    const known = new Set(Object.keys(cache.probe ?? {}).concat((cache.unreachable ?? []).flatMap((u) => u.tasks ?? [])));
-    const fresh = !stale(cache.at, now) && trackers.every((t) => known.has(t.task));
-    const claimed = Number.isFinite(cache.claim) && now - cache.claim < DEVBOX_CLAIM_MS;
-    if (!fresh && !claimed) cache = await refreshDevbox(cwd, file, cache, trackers, { probe, prList, now });
-    return {
-      active: true,
-      rows: taskRows(trackers, cache.probe ?? {}, cache.prs ?? []),
-      unreachable: (cache.unreachable ?? []).map(({ host, error }) => ({ host, error })),
-      at: cache.at ?? 0,
-      goto: await readJson(join(common, 'session-rail', 'devbox-goto.json')),
-    };
-  } catch {
-    return { active: false, rows: [], unreachable: [], at: 0 };
-  }
-}
-
-// The rail's Enter on a task: the desk's next devbox poll switches to its tab with that task open.
-export async function devboxGoto(cwd, { task, session } = {}) {
-  const common = (await run('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd }))?.trim();
-  if (!common || !task) return false;
-  await saveJson(join(common, 'session-rail', 'devbox-goto.json'), { task, session: session ?? null, at: Date.now() });
-  return true;
-}
-
-async function saveJson(file, value) {
-  try {
-    await mkdir(dirname(file), { recursive: true });
-    const tmp = `${file}.${process.pid}.tmp`;
-    await writeFile(tmp, JSON.stringify(value));
-    await rename(tmp, file);
-  } catch { /* an unwritable git dir: this pane still shows what it fetched */ }
-}
-
-async function refreshDevbox(cwd, file, cache, trackers, { probe, prList, now }) {
-  await saveJson(file, { ...cache, claim: now });
-  const hosts = Object.entries(byHost(trackers));
-  const [results, open] = await Promise.all([
-    Promise.all(hosts.map(([host, list]) => probe(host, probeScript(list)).catch((e) => ({ code: 255, out: '', err: String(e?.message ?? e) })))),
-    prList(cwd).catch(() => ({ ok: false, items: [] })),
-  ]);
-  const probed = { ...(cache.probe ?? {}) };
-  const unreachable = [];
-  hosts.forEach(([host, list], i) => {
-    const r = results[i] ?? {};
-    const seen = parseProbe(r.out);
-    if (r.code === 255 || (r.code !== 0 && !Object.keys(seen).length)) {
-      // Keep the last known tasks for this host; say why it can't be reached.
-      unreachable.push({ host, error: lastLine(r.err) || `ssh exited ${r.code}`, tasks: list.map((t) => t.task) });
-      return;
-    }
-    Object.assign(probed, seen);
-  });
-  const live = new Set(trackers.map((t) => t.task));
-  for (const k of Object.keys(probed)) if (!live.has(k)) delete probed[k];
-  const branches = new Set(trackers.map((t) => t.branch).filter(Boolean));
-  const prsKept = open?.ok
-    ? open.items.filter((p) => branches.has(p.headRefName)).map(({ number, url, headRefName }) => ({ number, url, headRefName }))
-    : cache.prs ?? [];
-  const next = { at: now, probe: probed, prs: prsKept, unreachable };
-  await saveJson(file, next);
-  return next;
-}

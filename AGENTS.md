@@ -6,7 +6,7 @@ Short map for a fresh Claude or Grok session in this repo. Read this for layout,
 
 Plain Node 18+ ESM in `bin/`. Zero npm dependencies. `hooks/` has no Node APIs; it uses the host's `$.process` and `$.plugin.root`.
 
-- `bin/rail.mjs` draws the rail. `bin/desk.mjs` draws Plan, Diff, Review, and Devbox. `bin/devbox.mjs` holds the devbox dispatch status rules.
+- `bin/rail.mjs` draws the rail. `bin/desk.mjs` draws Plan, Diff, and Review.
 - `bin/stop-hook.mjs` is the Stop test gate for Claude and Grok. The rules are in `bin/stopgate.mjs`. It skips the default branch and a branch with nothing changed.
 - `hooks/register.ts` is Claude's plugin. `bin/grok-hook.mjs` is Grok's.
 - `commands/rail.md` and `commands/desk.md` are Grok's `/rail` and `/desk`. `commands/approve-brief.md` is `/approve-brief`. A chat message that is exactly `approved` does the same. `commands/schedule.md` is `/schedule`. Leave `commands` out of `plugin.json`.

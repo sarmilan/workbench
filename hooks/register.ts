@@ -1,5 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { approvalRecord, briefFile, briefStatus, briefWriteOnMain, checkoutName, inWorkTree, isGitLock, mainCheckout, mainCheckoutNote, NO_BRIEF_BRANCHES, parseBrief, trackerWrite } from '../bin/brief.mjs'
+import { approvalRecord, briefFile, briefStatus, briefWriteOnMain, checkoutName, inWorkTree, isGitLock, mainCheckout, mainCheckoutNote, NO_BRIEF_BRANCHES, parseBrief } from '../bin/brief.mjs'
 import { outsideRepoNote } from '../bin/brief-instructions.mjs'
 import * as act from './activity.ts'
 import { goAhead } from './goahead.ts'
@@ -164,7 +164,6 @@ const gate = async ($: EngineInterface, tool: string, file: string) => {
   if (b && file === b.approvedPath) return refuse('session-rail: only the person approves the brief, in the desk, with /approve-brief, or with a message that is exactly approved.')
   // head.cwd too: the session cwd may be a symlinked path to the checkout, and relative shell writes resolve against it.
   if (!inWorkTree([head.root, head.cwd, mainCheckout(head.common)], file)) return null
-  if (trackerWrite(mainCheckout(head.common), file)) return null
   if (!b) {
     if (!NO_BRIEF_BRANCHES.includes(head.branch) || briefWriteOnMain(head.common, file)) return null
     // A symlinked session cwd (not a subdirectory of the toplevel): a relative brief path resolves under it, not the real common dir.

@@ -74,7 +74,7 @@ The rail and desk poll their sources (the activity file every second) and render
 | Component | Role |
 |---|---|
 | Rail (`bin/rail.mjs`) | Session tree (banner, agents and their handoffs, prompts), sessions on this machine, environment, context, cost, prompt cache, connectors; Git tab with the open-branch tree, checks and merge order. |
-| Desk (`bin/desk.mjs`) | Plan (the brief, with Approve), Diff (changes since the merge-base, grouped by chunk), Review (approach, code and wide review records), Devbox (dispatched devbox tasks). |
+| Desk (`bin/desk.mjs`) | Plan (the brief, with Approve), Diff (changes since the merge-base, grouped by chunk), Review (approach, code and wide review records). |
 | Claude plugin (`hooks/register.ts`) | Activity recording, brief instructions in the system prompt, the brief and review gates, the `review_approach` tool, `/code-review` capture, approval go-ahead, automatic compaction. |
 | Grok hook (`bin/grok-hook.mjs`) | The same activity file and gates for Grok; attaches the brief procedure on the first tool call of each turn. |
 | Stop hook (`bin/stop-hook.mjs`) | The Stop test gate for both hosts. |
@@ -90,8 +90,6 @@ The rail and desk poll their sources (the activity file every second) and render
 | `.git/session-rail/reviews/` | Per-branch review record: approach, code and wide runs, with finding statuses. |
 | `.git/session-rail/tests.json` | Optional per-checkout Stop gate command. |
 | `.git/session-rail/chores/` | CI chore state files. |
-| `.git/session-rail/devbox.json` | The devbox probe cache the rail and desk share (refreshed when older than 45 s), and `devbox-goto.json`, the rail's last Enter on a task. |
-| `.claude/hetzner-dispatch/*.json` (main checkout) | Devbox dispatch trackers, written by the dispatch flow. The view reads them; it runs only while one exists. |
 | `~/.claude/session-rail/activity/<session>.json` | Live session activity written by the hooks; `.desk.json` and `.rail.json` siblings hold desk and rail state. |
 | `~/.claude/session-rail/settings.json` | Shared settings (see Configuration). |
 | `~/.claude/session-rail/mascot.json` | The chosen pet. |
@@ -109,7 +107,6 @@ What is not gated:
 - **Paths outside the repo, on any branch.** "The repo" is this checkout's toplevel plus the main checkout, so a linked worktree's session cannot edit the main checkout unbriefed. Paths starting `~`, `$HOME` or `${HOME}` resolve against HOME.
 - `git worktree add|remove|move` to a path outside the repo, and `rsync` to a remote `host:path`.
 - Git's own lock files (`rm .git/index.lock`).
-- Devbox dispatch trackers: a top-level `*.json` or `prompt-*.txt` in `<main checkout>/.claude/hetzner-dispatch/`, on any branch, `main` included. A shell write through a variable (`> "$TRACKER_DIR/x.json"`) is not a literal path, so it stays refused; use the Write tool or a literal path.
 
 On `main`, `master` or a detached HEAD there is no brief, and a repo edit is refused. The agent writes the next branch's brief (`.git/session-rail/briefs/<branch>.md`; nothing else under `.git/session-rail/`), switches to that branch with `git switch <b>`, `git switch -c <b>` or `git checkout -b <b>`, and the brief shows on the Plan tab for Approve. A forced, merge or orphan switch is still a write, and so is a bare `git checkout <name>`, which may name a file. `git pull` and `git merge --ff-only` from upstream also run there. A refusal shows on the rail as `Held` and puts a `?` over the pet.
 
@@ -141,8 +138,7 @@ The desk's Review tab shows every finding with its status; **Run review** (`r`) 
 
 - **Rail, Session tab.** The banner names who is working and on what. Below it is a tree of the host agent and its subagents, each with the exact prompt it was handed and what it returned, then your prompts as chapters. Sections below cover the machine's sessions, environment, context, session cost, prompt-cache TTL and expiry, and MCP connectors.
 - **Rail, Git tab.** Open branches as a stack tree, each under the branch it would rebase onto, with ahead/behind counts, pull request checks, file clashes and a `Next` line for the merge order.
-- **Desk.** Plan shows the live brief with Approve. Diff groups the changes since the merge-base by chunk. Review shows the review record. Devbox lists dispatched devbox tasks; open one for its result, diff stat and log tail.
-- **Devbox tasks.** Tasks sent to a devbox with `/devbox dispatch` show under the current session on the rail: state (running, done, failed, timed out, refused, blocked), age, and PR number. Enter opens the task in the desk's Devbox tab. One `ssh -o BatchMode=yes <host> bash -s` per host reads every task's pid, exit code, result, log tail and diff stat, at most every 45 s, cached in `.git/session-rail/devbox.json` for both panes. A box that can't be reached is one `devbox: unreachable` line; the last known tasks stay.
+- **Desk.** Plan shows the live brief with Approve. Diff groups the changes since the merge-base by chunk. Review shows the review record.
 - **+ new.** Starts an isolated session: a worktree at the latest `main` in `<repo>.worktrees/<slug>`, a new iTerm window, and `claude "/start <problem>"`. Merged, clean worktrees whose session has ended can be removed from the rail.
 - **Pet.** A pixel creature that encodes session state: pace for busy or waiting, position for brief progress, growth stage for the branch lifecycle, and reactions for held edits, failures, subagents and background tasks.
 
