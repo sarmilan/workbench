@@ -248,6 +248,18 @@ test('on main from a symlinked cwd, a relative path to the next branch\'s brief 
   expect(edits).toEqual([`bash:${c}`])
 })
 
+for (const branch of ['main', 'feat/x']) {
+  test(`a devbox dispatch tracker may be written on ${branch}, and nothing else under .claude/`, async ($, on) => {
+    const { edits } = briefHarness(on, { branch, cwd: '/repo.worktrees/x', top: '/repo.worktrees/x' })
+    const ok = ['/repo/.claude/hetzner-dispatch/T1.json', '/repo/.claude/hetzner-dispatch/prompt-T1.txt']
+    for (const f of ok) expect(((await $.tool.call(edit(f))) as { deny?: string }).deny).toBeUndefined()
+    expect(edits).toEqual(ok)
+    for (const f of ['/repo/.claude/settings.json', '/repo/.claude/hetzner-dispatch/sub/T1.json', '/repo/.claude/hetzner-dispatch/../x.json', '/repo/.claude/hetzner-dispatch/run.sh']) {
+      expect(((await $.tool.call(edit(f))) as { deny?: string }).deny).toBeTruthy()
+    }
+  })
+}
+
 test('on a feature branch, switching to another branch still waits for the brief', async ($, on) => {
   const { edits } = briefHarness(on)
   const r = (await $.tool.call(bash('git switch other'))) as { deny?: string }

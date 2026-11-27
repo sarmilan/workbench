@@ -97,6 +97,18 @@ test('on main a repo edit is refused and names the branch and the brief', () => 
   assert.equal(editReason({ ...brief, approval: { approvedAt: 1 } }, '/repo/a.js'), null);
 });
 
+test('a devbox dispatch tracker may be written on main and on a branch, and nothing else under .claude/', () => {
+  for (const branch of ['main', 'feat/x']) {
+    const checkout = { branch, cwd: '/repo.worktrees/x', main: '/repo', common: '/repo/.git' };
+    const b = branch === 'main' ? null : brief;
+    assert.equal(editReason(b, '/repo/.claude/hetzner-dispatch/T1.json', checkout), null);
+    assert.equal(editReason(b, '/repo/.claude/hetzner-dispatch/prompt-T1.txt', checkout), null);
+    for (const f of ['/repo/.claude/settings.json', '/repo/.claude/hetzner-dispatch/sub/T1.json', '/repo/.claude/hetzner-dispatch/../x.json', '/repo/.claude/hetzner-dispatch/run.sh']) {
+      assert.ok(editReason(b, f, checkout), f);
+    }
+  }
+});
+
 test('on any branch a path outside the repo is not a repo edit', () => {
   const feature = { branch: 'feature/x', cwd: '/repo', main: '/repo' };
   assert.equal(editReason(brief, '/tmp/scratchpad/draft.md', feature), null);

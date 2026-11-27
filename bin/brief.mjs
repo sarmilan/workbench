@@ -9,7 +9,7 @@
 // "### Chunk N: name" blocks, each an outline plus, once built, "Done: summary" and "Files: a, b".
 // main/master and a detached HEAD have no brief. A repo edit there is refused until the work is on a branch,
 // except the next branch's brief (briefWriteOnMain), so the agent writes it and then switches to that branch.
-// Git's own lock files are never a code edit (isGitLock).
+// Git's own lock files are never a code edit (isGitLock), nor are devbox dispatch trackers (trackerWrite).
 
 export const BRIEF_SECTIONS = ['problem', 'solution', 'design', 'mockups', 'engineering'];
 export const NO_BRIEF_BRANCHES = ['main', 'master', 'HEAD', 'detached'];
@@ -54,6 +54,21 @@ export function briefWriteOnMain(common, file) {
   if (!common || typeof file !== 'string' || /(?:^|\/)\.\.?(?:\/|$)/.test(file)) return false;
   const dir = `${common}/session-rail/briefs/`;
   return file.startsWith(dir) && !file.slice(dir.length).includes('/') && file.endsWith('.md');
+}
+
+/**
+ * True when `file` is a devbox dispatch tracker: a top-level `*.json` or `prompt-*.txt` in
+ * `<main checkout>/.claude/hetzner-dispatch/`. The dispatch flow writes these from any branch, main
+ * included, and they are gitignored, so they are never a code edit. A path with `.` or `..` segments never is.
+ * @param {string} main the main checkout (`mainCheckout(common)`)
+ * @param {string} file absolute path
+ */
+export function trackerWrite(main, file) {
+  if (!main || typeof file !== 'string' || /(?:^|\/)\.\.?(?:\/|$)/.test(file)) return false;
+  const dir = `${main}/.claude/hetzner-dispatch/`;
+  if (!file.startsWith(dir)) return false;
+  const name = file.slice(dir.length);
+  return !name.includes('/') && (/^[^/]+\.json$/.test(name) || /^prompt-[^/]+\.txt$/.test(name));
 }
 
 /**

@@ -19,7 +19,7 @@ import * as src from './sources.mjs';
 import { reviewAndSave, loadReviews } from './reviewer.mjs';
 import { wideReviewAndSave } from './widereview.mjs';
 import { offerWide } from './wide.mjs';
-import { ESC, fg, dim, bold, C, bg, bgOpen, charWidth, width, trunc, clean, tabBar, usePalette, paneBgOn, paneBgOff } from './term.mjs';
+import { ESC, fg, dim, bold, C, bg, bgOpen, charWidth, width, trunc, wrap, clean, tabBar, usePalette, paneBgOn, paneBgOff } from './term.mjs';
 import { applySaved } from './fontsize.mjs';
 import { approvalRecord, mainCheckoutNote, NO_BRIEF_BRANCHES } from './brief.mjs';
 import { deskOutsideNote } from './brief-instructions.mjs';
@@ -28,6 +28,7 @@ import { codeFindings, runType } from './cadence.mjs';
 import { mergeWarning } from './reviewstatus.mjs';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -44,10 +45,12 @@ const taskIndex = new src.TaskIndex();
 const data = { plan: null, brief: null, checkout: null, recent: null, todos: null, root: null, files: [], diff: null, claude: null, // diff: { path, lines } of the open file
   settings: {}, review: { running: null, runs: [], path: undefined, pr: null, head: null } }; // runs: the branch's saved reviews, newest first
 let prFetched = 0;
-const TABS = ['plan', 'diff', 'review'];
-const ui = { tab: 'plan', scroll: { plan: 0, diff: 0, review: 0 }, sel: 0, open: null, toast: null,
-  jump: null, rsel: 0 };
-const seen = { plan: undefined }; // the plan signature last drawn; undefined until the first load
+const TABS = ['plan', 'diff', 'review', 'devbox'];
+const ui = { tab: 'plan', scroll: { plan: 0, diff: 0, review: 0, devbox: 0 }, sel: 0, open: null, toast: null,
+  jump: null, rsel: 0, dsel: 0, dopen: null }; // dsel: the selected devbox task, dopen: the task shown in full
+// plan: the plan signature last drawn (undefined until the first load). goto: the rail's last Enter on a devbox
+// task already followed; one written in the 15s before this desk started still counts (the rail opens the desk).
+const seen = { plan: undefined, goto: Date.now() - 15_000 };
 const toast = (text) => { ui.toast = { text, until: Date.now() + 2500 }; };
 let draw = () => {}; // replaced by the interactive panel
 
@@ -72,6 +75,18 @@ const loaders = {
   async recent() {
     if (!data.plan || !data.recent) data.recent = await src.recentWork(cwd);
     if (!data.brief?.text || !data.todos) data.todos = await src.todos(cwd);
+  },
+  // Dispatched devbox tasks (sources.devboxStatus: the cache the rail shares). The rail's Enter on a task
+  // (devboxGoto) selects this tab with that task open, when it was this session's rail.
+  async devbox() {
+    data.devbox = await src.devboxStatus(cwd);
+    const go = data.devbox.goto;
+    if (!go?.task || !(go.at > seen.goto)) return;
+    seen.goto = go.at;
+    if (go.session && data.claude?.sessionId && go.session !== data.claude.sessionId) return;
+    const i = data.devbox.rows.findIndex((r) => r.task === go.task);
+    if (i < 0) return;
+    ui.tab = 'devbox'; ui.dsel = i; ui.dopen = go.task; ui.scroll.devbox = 0;
   },
   async diff() {
     ({ root: data.root, files: data.files } = await src.branchFiles(cwd));
@@ -552,6 +567,65 @@ function reviewLines(w) {
   return { lines, ids, buttons };
 }
 
+// ── Devbox: dispatched tasks, then one task in full ────────────────────────────
+const TASK_GLYPH = { running: ['●', C.accent], done: ['✔', C.green], failed: ['✗', C.red], 'timed out': ['⧗', C.red],
+  refused: ['⊘', C.yellow], blocked: ['◆', C.yellow], unknown: ['○', C.gray] };
+const glyph = (state) => { const [g, c] = TASK_GLYPH[state] ?? TASK_GLYPH.unknown; return fg(c, g); };
+const devboxRows = () => data.devbox?.rows ?? [];
+function devboxLines(w) {
+  const dbx = data.devbox;
+  const lines = [], ids = [];
+  const push = (l, id = null) => { lines.push(l); ids.push(id); };
+  if (!dbx?.active) return { lines: [dim('No devbox tasks dispatched from this repo.'), '', ...wrap('A task shows here while its tracker is in .claude/hetzner-dispatch/ in the main checkout.', w).map(dim)], ids: [] };
+  for (const u of dbx.unreachable) push(fg(C.red, trunc(`devbox: unreachable${u.host !== 'devbox' ? ` (${clean(u.host)})` : ''} · ${clean(u.error)}`, w)));
+  const row = dbx.rows.find((r) => r.task === ui.dopen);
+  if (row) return devboxDetail(row, w, lines, ids);
+  const n = dbx.rows.length;
+  push(dim(`${n} task${n === 1 ? '' : 's'}${dbx.at ? ` · checked ${ago(dbx.at)}` : ''}`));
+  push('');
+  dbx.rows.forEach((r, i) => {
+    const right = [r.state, r.started ? ago(r.started) : '', clean(r.host), r.pr?.number ? `#${r.pr.number}` : ''].filter(Boolean).join(' · ');
+    const name = trunc(clean(r.task), Math.max(4, w - 4 - width(right)));
+    push(`${glyph(r.state)} ${bold(name)}${' '.repeat(Math.max(1, w - 2 - width(name) - width(right)))}${dim(right)}`, i);
+    push(dim(trunc(`  ${clean(r.branch)}`, w)), i);
+  });
+  push('');
+  push(dim('enter opens a task · esc goes back'));
+  return { lines, ids };
+}
+function devboxDetail(r, w, lines, ids) {
+  const push = (l) => { lines.push(l); ids.push(null); };
+  const head = (t) => { push(''); push(bold(fg(C.accent, t))); };
+  const field = (k, v) => { if (v) push(dim(k.padEnd(9)) + trunc(clean(String(v)), Math.max(4, w - 9))); };
+  push(`${glyph(r.state)} ${bold(clean(r.task))}  ${dim(r.state)}`);
+  head('Tracker');
+  field('host', r.host);
+  field('branch', r.branch);
+  if (r.started) field('started', `${when(r.started)} · ${ago(r.started)}`);
+  const res = r.result;
+  head('Result');
+  if (!res) push(dim(r.state === 'running' ? 'Not finished yet.' : 'No result file.'));
+  else if (res.raw != null) for (const l of wrap(clean(String(res.raw)), w).slice(0, 12)) push(l);
+  else {
+    field('status', res.status);
+    field('PR', r.pr?.url || res.pr_url || (r.pr?.number ? `#${r.pr.number}` : ''));
+    field('commit', res.commit_sha);
+    if (res.summary) for (const l of wrap(clean(String(res.summary)), w)) push(l);
+    const blockers = Array.isArray(res.blockers) ? res.blockers : res.blockers ? [res.blockers] : [];
+    for (const b of blockers) for (const [i, l] of wrap(clean(typeof b === 'string' ? b : JSON.stringify(b)), w - 2).entries()) push(fg(C.yellow, i ? `  ${l}` : `• ${l}`));
+  }
+  if (r.pr?.url && (!res || res.raw != null)) field('PR', r.pr.url);
+  head('Diff');
+  if (!r.diff.length) push(dim('No changes against the default branch.'));
+  for (const l of r.diff) push(trunc(clean(l), w));
+  head('Log');
+  if (!r.log.length) push(dim('No log yet.'));
+  for (const l of r.log) push(dim(trunc(clean(l), w)));
+  push('');
+  push(dim(`esc back to the list${r.pr?.url ? ' · o opens the PR' : ''}`));
+  return { lines, ids };
+}
+
 // ── Frame ──────────────────────────────────────────────────────────────────────
 let layout = { tabs: [], tabRow: 2, body: 3, ids: [], scroll: 0 };
 function frame(W, H) {
@@ -562,7 +636,8 @@ function frame(W, H) {
   const { a, r } = totals();
   const nf = listedAll().filter((f) => f.status === 'open').length;
   const labels = { plan: 'Plan', diff: `Diff ${data.files.length ? `+${a} −${r}` : ''}`.trim(),
-    review: `Review${nf ? ` ${nf}` : ''}${data.review.running ? ' ◌' : ''}` };
+    review: `Review${nf ? ` ${nf}` : ''}${data.review.running ? ' ◌' : ''}`,
+    devbox: `Devbox${data.devbox?.active ? ` ${data.devbox.rows.length}` : ''}${data.devbox?.unreachable?.length ? ' !' : ''}` };
   const { bar, under, spans: tabs } = tabBar(TABS.map((t) => [t, labels[t]]), ui.tab, w);
 
   let body, ids = [], buttons = [], target = -1;
@@ -572,9 +647,10 @@ function frame(W, H) {
     if (planChoice(data.brief, data.plan) === 'brief' && ['ready', 'changed'].includes(data.brief?.status)) buttons = [{ row: 1, from: 0, to: data.brief.status === 'ready' ? 9 : 15, action: 'approve' }];
   }
   else if (ui.tab === 'review') ({ lines: body, ids, buttons } = reviewLines(w));
+  else if (ui.tab === 'devbox') ({ lines: body, ids } = devboxLines(w));
   else if (ui.open) ({ lines: body, target } = fileLines(w));
   else ({ lines: body, ids } = listLines(w));
-  const selected = ui.tab === 'review' ? ui.rsel : ui.sel;
+  const selected = ui.tab === 'review' ? ui.rsel : ui.tab === 'devbox' ? ui.dsel : ui.sel;
 
   // Lists scroll to keep the selection in view; a jump to a finding's line puts it near the top.
   const key = ui.tab === 'diff' && ui.open ? 'file' : ui.tab;
@@ -596,7 +672,7 @@ function frame(W, H) {
   // The bottom line: a toast on the left, how to get around on the right (iTerm's own pane keys, and the
   // tab keys), dropped when the toast needs the room. Cut the plain text before styling: a line past the
   // last column would scroll the screen.
-  const keys = '⌘[ ⌘] panels · tab or 1 2 3 tabs';
+  const keys = '⌘[ ⌘] panels · tab or 1-4 tabs';
   const toastText = ui.toast && ui.toast.until > Date.now() ? trunc(` ${ui.toast.text}`, W - 1) : '';
   const room = W - 1 - width(toastText) - width(keys);
   const footer = fg(C.green, toastText) + (room >= (toastText ? 2 : 0) ? ' '.repeat(room) + dim(keys) : '');
@@ -646,6 +722,7 @@ if (args.includes('--frame')) {
   if (flag('--head')) data.review.head = flag('--head');
   if (flag('--select') != null) ui.rsel = +flag('--select');
   if (flag('--jump') != null) await jumpTo(+flag('--jump'));
+  if (flag('--task') != null) { ui.tab = 'devbox'; ui.dopen = flag('--task'); }
   console.log(frame(W, H).join('\n'));
   process.exit(0);
 }
@@ -677,7 +754,7 @@ const refresh = (name) => {
   let busy = false;
   return async () => { if (busy) return; busy = true; try { await loaders[name](); } catch {} busy = false; draw(); };
 };
-const schedule = { plan: 1000, diff: 3000, reviews: 3000, recent: 60_000 };
+const schedule = { plan: 1000, diff: 3000, reviews: 3000, devbox: 3000, recent: 60_000 };
 const runners = Object.fromEntries(Object.keys(schedule).map((k) => [k, refresh(k)]));
 // The desk opens on Plan (recent work until there's a plan); after the first load, changes take over.
 // Recent work asks gh, which can take seconds, so it arrives after the first draw.
@@ -707,6 +784,7 @@ const scrollBy = (d) => { const key = ui.tab === 'diff' && ui.open ? 'file' : ui
 const move = (d) => {
   const n = listedAll().length;
   if (ui.tab === 'review') { if (n) ui.rsel = Math.max(0, Math.min(n - 1, ui.rsel + d)); else scrollBy(d); return; }
+  if (ui.tab === 'devbox' && !ui.dopen && devboxRows().length) { ui.dsel = Math.max(0, Math.min(devboxRows().length - 1, ui.dsel + d)); return; }
   if (ui.tab === 'diff' && !ui.open && data.files.length) ui.sel = stepFile(d);
   else scrollBy(d);
 };
@@ -729,7 +807,13 @@ const handleKey = async (k) => {
   if (k === '\x03' || k === 'q') return quit();
   if (k === '\t') return manual(TABS[(TABS.indexOf(ui.tab) + 1) % TABS.length]);
   if (k === '\x1b[Z') return manual(TABS[(TABS.indexOf(ui.tab) + TABS.length - 1) % TABS.length]);
-  if (k === '1' || k === '2' || k === '3') return manual(TABS[+k - 1]);
+  if (k === '1' || k === '2' || k === '3' || k === '4') return manual(TABS[+k - 1]);
+  if (ui.tab === 'devbox') {
+    const open = devboxRows().find((r) => r.task === ui.dopen);
+    if (open && (k === '\x1b' || k === 'h' || k === '\x1b[D')) { ui.dopen = null; ui.scroll.devbox = 0; return; }
+    if (open && k === 'o' && open.pr?.url) return execFile('open', [open.pr.url], (err) => toast(err ? "Couldn't open the PR" : `Opened ${open.pr.number ? `#${open.pr.number}` : 'the PR'}`));
+    if (!open && (k === '\r' || k === 'l' || k === '\x1b[C') && devboxRows()[ui.dsel]) { ui.dopen = devboxRows()[ui.dsel].task; ui.scroll.devbox = 0; return; }
+  }
   if (ui.tab === 'review') {
     const findings = listedAll();
     if (k === 'r') return review('run');
@@ -760,6 +844,7 @@ const handleMouse = async (b, x, y) => {
   if (y === layout.tabRow) { const t = layout.tabs.find((s) => x - 2 >= s.from && x - 2 < s.to); if (t) manual(t.tab); return; }
   const i = layout.ids[y - 1 - layout.body];
   if (ui.tab === 'diff' && !ui.open && i != null) return openFile(i);
+  if (ui.tab === 'devbox' && !ui.dopen && i != null) { if (ui.dsel === i && devboxRows()[i]) { ui.dopen = devboxRows()[i].task; ui.scroll.devbox = 0; } else ui.dsel = i; return; }
   if (ui.tab === 'plan' && layout.buttons.some((s) => s.row === y - 1 - layout.body && x - 2 >= s.from && x - 2 < s.to)) return approveBrief();
   if (ui.tab === 'review') {
     const b = layout.buttons.find((s) => s.row === y - 1 - layout.body && x - 2 >= s.from && x - 2 < s.to);
